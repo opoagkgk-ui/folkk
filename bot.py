@@ -115,10 +115,43 @@ def save_config(config):
         logging.error(f"Ошибка сохранения конфига: {e}")
 
 async def load_stickers(app: Application):
+async def load_stickers(app: Application):
     global ALL_STICKERS, litvin_stickers, bred_stickers
     config = load_config()
     commands_config = config.get("commands", {})
 
+    # Собираем все имена паков
+    all_packs = []
+    for cmd_packs in commands_config.values():
+        for entry in cmd_packs:
+            all_packs.append(entry.get("pack_name"))
+
+    # Знакомим бота с каждым паком
+    me = await app.bot.get_me()
+    for pack_name in set(all_packs):
+        try:
+            await app.bot.get_sticker_set(pack_name)
+            logging.info(f"Пак {pack_name} уже известен боту")
+        except Exception:
+            logging.warning(f"Бот не знает пак {pack_name}, пробую добавить...")
+            try:
+                # Получаем пак по ссылке (это не требует предварительного знакомства)
+                pack = await app.bot.get_sticker_set(pack_name)
+                if pack.stickers:
+                    # Отправляем первый стикер "в никуда" — бот знакомится с паком
+                    # Отправляем в сохранённые сообщения (chat_id = user_id бота)
+                    await app.bot.send_sticker(
+                        chat_id=me.id,
+                        sticker=pack.stickers[0].file_id
+                    )
+                    logging.info(f"Пак {pack_name} успешно добавлен (отправлен стикер в Избранное)")
+                else:
+                    logging.warning(f"Пак {pack_name} пустой")
+            except Exception as e:
+                logging.error(f"Не удалось добавить пак {pack_name}: {e}")
+                continue
+
+    # Теперь загружаем стикеры по конфигу
     all_folk = []
     all_litvin = []
     all_bred = []
