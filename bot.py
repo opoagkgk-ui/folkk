@@ -34,11 +34,11 @@ RANDOM_WORDS = [
 # ---------- ГЛОБАЛЬНЫЕ ДАННЫЕ ----------
 ALL_STICKERS = []
 litvin_stickers = []
-tihon_stickers = []
+bred_stickers = []          # бывший tihon
 
 cooldowns_folk = {}
 cooldowns_litvin = {}
-cooldowns_tihon = {}
+cooldowns_bred = {}         # бывший tihon
 
 chat_cooldowns = {}
 pending_cooldown_input = {}
@@ -74,13 +74,22 @@ def save_user_groups():
     except Exception as e:
         logging.error(f"Не удалось сохранить user_groups.json: {e}")
 
-# ---------- КОНФИГУРАЦИЯ СТИКЕРОВ ----------
+# ---------- КОНФИГУРАЦИЯ СТИКЕРОВ (с дефолтными паками) ----------
 def load_config():
     default_config = {
         "commands": {
-            "folk": [],
-            "litvin": [],
-            "tihon": []
+            "folk": [
+                {"pack_name": "ByFolkValley", "remove_last": 0},
+                {"pack_name": "AtlasScottishFold", "remove_last": 0},
+                {"pack_name": "Vooocaaa_by_fStikBot", "remove_last": 2}
+            ],
+            "litvin": [
+                {"pack_name": "pk_2746611_by_Ctikerubot", "remove_last": 2}
+            ],
+            "bred": [
+                {"pack_name": "DouBlya", "remove_last": 0},
+                {"pack_name": "Fartsmopington_by_MoiStikiBot", "remove_last": 0}
+            ]
         }
     }
     if not os.path.exists(CONFIG_FILE):
@@ -89,7 +98,11 @@ def load_config():
         return default_config
     try:
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
+            loaded = json.load(f)
+            # Проверяем наличие ключа bred (для обратной совместимости)
+            if "tihon" in loaded.get("commands", {}):
+                loaded["commands"]["bred"] = loaded["commands"].pop("tihon")
+            return loaded
     except Exception as e:
         logging.error(f"Ошибка загрузки конфига: {e}")
         return default_config
@@ -102,13 +115,13 @@ def save_config(config):
         logging.error(f"Ошибка сохранения конфига: {e}")
 
 async def load_stickers(app: Application):
-    global ALL_STICKERS, litvin_stickers, tihon_stickers
+    global ALL_STICKERS, litvin_stickers, bred_stickers
     config = load_config()
     commands_config = config.get("commands", {})
 
     all_folk = []
     all_litvin = []
-    all_tihon = []
+    all_bred = []
 
     for command, packs in commands_config.items():
         stickers_list = []
@@ -132,27 +145,27 @@ async def load_stickers(app: Application):
             all_folk = stickers_list
         elif command == "litvin":
             all_litvin = stickers_list
-        elif command == "tihon":
-            all_tihon = stickers_list
+        elif command == "bred":
+            all_bred = stickers_list
 
     ALL_STICKERS = all_folk
     litvin_stickers = all_litvin
-    tihon_stickers = all_tihon
-    logging.info(f"Стикеры обновлены: folk={len(ALL_STICKERS)}, litvin={len(litvin_stickers)}, tihon={len(tihon_stickers)}")
+    bred_stickers = all_bred
+    logging.info(f"Стикеры обновлены: folk={len(ALL_STICKERS)}, litvin={len(litvin_stickers)}, bred={len(bred_stickers)}")
 
 def get_sticker_list_for_command(command):
     if command == "folk":
         return ALL_STICKERS
     elif command == "litvin":
         return litvin_stickers
-    elif command == "tihon":
-        return tihon_stickers
+    elif command == "bred":
+        return bred_stickers
     return []
 
 # ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ КУЛДАУНА ----------
 def get_cd_duration(chat_id, command):
     if chat_id not in chat_cooldowns:
-        chat_cooldowns[chat_id] = {'folk': 300, 'litvin': 300, 'tihon': 300}
+        chat_cooldowns[chat_id] = {'folk': 300, 'litvin': 300, 'bred': 300}
     return chat_cooldowns[chat_id].get(command, 300)
 
 def get_cooldown_dict(command):
@@ -160,8 +173,8 @@ def get_cooldown_dict(command):
         return cooldowns_folk
     elif command == 'litvin':
         return cooldowns_litvin
-    elif command == 'tihon':
-        return cooldowns_tihon
+    elif command == 'bred':
+        return cooldowns_bred
     return {}
 
 def is_cooling(chat_id, user_id, command):
@@ -260,8 +273,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "  (Каждый раз стикер случайный!)\n"
             "• В группе работают команды:\n"
             "  /folk — случайный стикер\n"
-            "  /litvin — стикер из пака Litvin\n"
-            "  /tihon — стикер из пака Tihon\n"
+            "  /litvin — случайный стикер\n"
+            "  /bred — случайный стикер\n"
             "  /sosat — бессвязный бред\n"
             "  /cooldown — настройка кулдаунов (владелец)\n\n"
             "👤 Кнопка «Профиль» откроет Mini App с вашими группами.\n\n"
@@ -272,8 +285,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             "Я в группе! Доступные команды:\n"
             "/folk — случайный стикер\n"
-            "/litvin — стикер из пака Litvin\n"
-            "/tihon — стикер из пака Tihon\n"
+            "/litvin — стикер из Litvin пака\n"
+            "/bred — стикер из Bred пака\n"
             "/sosat — рандомный бред\n"
             "/cooldown — настройка кулдаунов (владелец)"
         )
@@ -309,20 +322,20 @@ async def litvin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_sticker(sticker=sticker_id)
     set_cooldown_used(chat_id, user_id, 'litvin')
 
-async def tihon(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def bred(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
-    is_cool, remain = is_cooling(chat_id, user_id, 'tihon')
+    is_cool, remain = is_cooling(chat_id, user_id, 'bred')
     if is_cool:
         mins, secs = divmod(remain.seconds, 60)
         await update.message.reply_text(f"⏳ Подожди ещё {mins} мин. {secs} сек.", quote=True)
         return
-    if not tihon_stickers:
-        await update.message.reply_text("Стикеры для /tihon пока не настроены.")
+    if not bred_stickers:
+        await update.message.reply_text("Стикеры для /bred пока не настроены.")
         return
-    sticker_id = random.choice(tihon_stickers)
+    sticker_id = random.choice(bred_stickers)
     await update.message.reply_sticker(sticker=sticker_id)
-    set_cooldown_used(chat_id, user_id, 'tihon')
+    set_cooldown_used(chat_id, user_id, 'bred')
 
 async def sosat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     count = random.randint(3, 6)
@@ -352,18 +365,18 @@ async def cooldown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     folk_cd = get_cd_duration(chat.id, 'folk')
     litvin_cd = get_cd_duration(chat.id, 'litvin')
-    tihon_cd = get_cd_duration(chat.id, 'tihon')
+    bred_cd = get_cd_duration(chat.id, 'bred')
     text = (
         f"⚙️ **Настройка кулдаунов**\n\n"
         f"• /folk: **{folk_cd} с.**\n"
         f"• /litvin: **{litvin_cd} с.**\n"
-        f"• /tihon: **{tihon_cd} с.**\n\n"
+        f"• /bred: **{bred_cd} с.**\n\n"
         "Выбери команду для изменения:"
     )
     keyboard = [
         [InlineKeyboardButton(f"🔄 Folk ({folk_cd}с)", callback_data="cooldown_select:folk")],
         [InlineKeyboardButton(f"🔄 Litvin ({litvin_cd}с)", callback_data="cooldown_select:litvin")],
-        [InlineKeyboardButton(f"🔄 Tihon ({tihon_cd}с)", callback_data="cooldown_select:tihon")],
+        [InlineKeyboardButton(f"🔄 Bred ({bred_cd}с)", callback_data="cooldown_select:bred")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
@@ -442,13 +455,13 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
     folk_packs = config["commands"]["folk"]
     litvin_packs = config["commands"]["litvin"]
-    tihon_packs = config["commands"]["tihon"]
+    bred_packs = config["commands"]["bred"]
 
     text = (
         "🔧 **Админ-панель управления стикерами**\n\n"
         f"/folk: {len(folk_packs)} пак(ов), стикеров: {len(ALL_STICKERS)}\n"
         f"/litvin: {len(litvin_packs)} пак(ов), стикеров: {len(litvin_stickers)}\n"
-        f"/tihon: {len(tihon_packs)} пак(ов), стикеров: {len(tihon_stickers)}\n\n"
+        f"/bred: {len(bred_packs)} пак(ов), стикеров: {len(bred_stickers)}\n\n"
         "Выберите действие:"
     )
 
@@ -483,7 +496,7 @@ async def admin_button_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             "Где номер команды:\n"
             "`1` — /folk\n"
             "`2` — /litvin\n"
-            "`3` — /tihon\n\n"
+            "`3` — /bred\n\n"
             "Пример:\n"
             "`2 FolkPack 2`\n"
             "(добавит пак FolkPack в /litvin и удалит 2 последних стикера)\n\n"
@@ -495,7 +508,7 @@ async def admin_button_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     elif data == "admin_show_config":
         config = load_config()
         text = "📋 **Текущая конфигурация:**\n\n"
-        for cmd in ["folk", "litvin", "tihon"]:
+        for cmd in ["folk", "litvin", "bred"]:
             packs = config["commands"][cmd]
             text += f"**/{cmd}**:\n"
             if not packs:
@@ -509,7 +522,7 @@ async def admin_button_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     elif data == "admin_remove_pack":
         config = load_config()
         keyboard = []
-        for cmd in ["folk", "litvin", "tihon"]:
+        for cmd in ["folk", "litvin", "bred"]:
             for idx, pack in enumerate(config["commands"][cmd]):
                 label = f"/{cmd}: {pack['pack_name']} (remove: {pack.get('remove_last',0)})"
                 callback = f"removepack:{cmd}:{idx}"
@@ -522,7 +535,7 @@ async def admin_button_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     elif data == "admin_edit_remove":
         config = load_config()
         keyboard = []
-        for cmd in ["folk", "litvin", "tihon"]:
+        for cmd in ["folk", "litvin", "bred"]:
             for idx, pack in enumerate(config["commands"][cmd]):
                 label = f"/{cmd}: {pack['pack_name']} (remove: {pack.get('remove_last',0)})"
                 callback = f"editremove:{cmd}:{idx}"
@@ -539,24 +552,24 @@ async def admin_button_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             f"✅ Стикеры перезагружены!\n\n"
             f"Folk: {len(ALL_STICKERS)}\n"
             f"Litvin: {len(litvin_stickers)}\n"
-            f"Tihon: {len(tihon_stickers)}"
+            f"Bred: {len(bred_stickers)}"
         )
 
     elif data == "admin_clear_cooldowns":
         count_folk = len(cooldowns_folk)
         count_litvin = len(cooldowns_litvin)
-        count_tihon = len(cooldowns_tihon)
+        count_bred = len(cooldowns_bred)
         cooldowns_folk.clear()
         cooldowns_litvin.clear()
-        cooldowns_tihon.clear()
+        cooldowns_bred.clear()
         pending_cooldown_input.clear()
-        total = count_folk + count_litvin + count_tihon
+        total = count_folk + count_litvin + count_bred
         await query.answer(f"Сброшено кулдаунов: {total}")
         await query.edit_message_text(
             f"🧹 Кулдауны сброшены:\n"
             f"/folk: {count_folk}\n"
             f"/litvin: {count_litvin}\n"
-            f"/tihon: {count_tihon}"
+            f"/bred: {count_bred}"
         )
 
     elif data == "admin_stats":
@@ -568,7 +581,7 @@ async def admin_button_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             f"💬 Всего групп: {total_groups}\n"
             f"🎯 Стикеров Folk: {len(ALL_STICKERS)}\n"
             f"🎯 Стикеров Litvin: {len(litvin_stickers)}\n"
-            f"🎯 Стикеров Tihon: {len(tihon_stickers)}",
+            f"🎯 Стикеров Bred: {len(bred_stickers)}",
             parse_mode="Markdown"
         )
 
@@ -619,7 +632,7 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private" and user.id not in admin_state:
         parts = text.split()
         if len(parts) == 3 and parts[0] in ("1", "2", "3") and parts[2].isdigit():
-            cmd_map = {"1": "folk", "2": "litvin", "3": "tihon"}
+            cmd_map = {"1": "folk", "2": "litvin", "3": "bred"}
             cmd = cmd_map[parts[0]]
             pack_name = parts[1]
             remove_last = int(parts[2])
@@ -701,8 +714,9 @@ def run_flask():
 # ---------- ЗАПУСК ----------
 def main():
     load_user_groups()
+    # Создаём конфиг с дефолтными паками, если его нет
     if not os.path.exists(CONFIG_FILE):
-        default_config = {"commands": {"folk": [], "litvin": [], "tihon": []}}
+        default_config = load_config()  # эта функция уже возвращает дефолтный с паками
         save_config(default_config)
 
     app = Application.builder().token(TOKEN).build()
@@ -710,13 +724,12 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("folk", folk))
     app.add_handler(CommandHandler("litvin", litvin))
-    app.add_handler(CommandHandler("tihon", tihon))
+    app.add_handler(CommandHandler("bred", bred))
     app.add_handler(CommandHandler("sosat", sosat))
     app.add_handler(CommandHandler("cooldown", cooldown_command))
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(InlineQueryHandler(inline_query))
 
-    # Порядок важен: сначала более специфичные паттерны
     app.add_handler(CallbackQueryHandler(cooldown_button_handler, pattern="^cooldown_select:"))
     app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern="^(removepack|editremove):"))
     app.add_handler(CallbackQueryHandler(admin_button_handler, pattern="^admin_"))
