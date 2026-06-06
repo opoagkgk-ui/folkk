@@ -120,38 +120,38 @@ async def load_stickers(app: Application):
     config = load_config()
     commands_config = config.get("commands", {})
 
-    # Собираем все имена паков
     all_packs = []
     for cmd_packs in commands_config.values():
         for entry in cmd_packs:
             all_packs.append(entry.get("pack_name"))
 
-    # Знакомим бота с каждым паком через raw API
     me = await app.bot.get_me()
+
+    # Знакомим бота с каждым паком
     for pack_name in set(all_packs):
         try:
-            # Используем прямой вызов API вместо get_sticker_set
+            # Используем сырой запрос к API
             data = await app.bot._post("getStickerSet", {"name": pack_name})
-            if data and data.get("ok", False):
-                result = data.get("result", {})
-                stickers_raw = result.get("stickers", [])
-                if stickers_raw:
-                    first_sticker_id = stickers_raw[0].get("file_id")
-                    if first_sticker_id:
-                        await app.bot.send_sticker(chat_id=me.id, sticker=first_sticker_id)
-                        logging.info(f"Пак {pack_name} успешно добавлен")
-                    else:
-                        logging.warning(f"Пак {pack_name}: не удалось получить file_id")
+            if data and data.get("ok"):
+                stickers_raw = data["result"].get("stickers", [])
+                # Берём только первый НЕ видео стикер
+                first_sticker = None
+                for s in stickers_raw:
+                    if not s.get("is_video") and not s.get("is_animated"):
+                        first_sticker = s
+                        break
+                if first_sticker:
+                    await app.bot.send_sticker(chat_id=me.id, sticker=first_sticker["file_id"])
+                    logging.info(f"Пак {pack_name} успешно добавлен")
+                else:
+                    logging.warning(f"Пак {pack_name}: нет обычных стикеров (только видео/анимированные)")
             else:
                 logging.warning(f"Пак {pack_name}: API вернул ошибку")
         except Exception as e:
             logging.error(f"Не удалось добавить пак {pack_name}: {e}")
-            continue
 
-    # Загружаем стикеры по конфигу через raw API
-    all_folk = []
-    all_litvin = []
-    all_bred = []
+    # Загружаем стикеры
+    all_folk, all_litvin, all_bred = [], [], []
 
     for command, packs in commands_config.items():
         stickers_list = []
@@ -160,21 +160,21 @@ async def load_stickers(app: Application):
             remove_last = int(entry.get("remove_last", 0))
             try:
                 data = await app.bot._post("getStickerSet", {"name": pack_name})
-                if data and data.get("ok", False):
-                    result = data.get("result", {})
-                    stickers_raw = result.get("stickers", [])
-                    stickers = [s.get("file_id") for s in stickers_raw if s.get("file_id")]
-                    
-                    if remove_last > 0:
-                        if len(stickers) > remove_last:
-                            stickers = stickers[:-remove_last]
-                        else:
-                            logging.warning(f"В паке {pack_name} меньше {remove_last} стикеров")
-                    
+                if data and data.get("ok"):
+                    stickers_raw = data["result"].get("stickers", [])
+                    # Фильтруем: только обычные стикеры (не видео, не анимированные)
+                    stickers = [
+                        s["file_id"] for s in stickers_raw 
+                        if s.get("file_id") and not s.get("is_video") and not s.get("is_animated")
+                    ]
+                    if remove_last > 0 and len(stickers) > remove_last:
+                        stickers = stickers[:-remove_last]
                     stickers_list.extend(stickers)
-                    logging.info(f"Загружен пак {pack_name} для /{command}, стикеров: {len(stickers)}")
+                    logging.info(f"Пак {pack_name} → /{command}, +{len(stickers)} стикеров")
+                else:
+                    logging.error(f"Пак {pack_name}: API error")
             except Exception as e:
-                logging.error(f"Не удалось загрузить пак {pack_name}: {e}")
+                logging.error(f"Пак {pack_name}: {e}")
 
         if command == "folk":
             all_folk = stickers_list
@@ -186,8 +186,7 @@ async def load_stickers(app: Application):
     ALL_STICKERS = all_folk
     litvin_stickers = all_litvin
     bred_stickers = all_bred
-    logging.info(f"Стикеры обновлены: folk={len(ALL_STICKERS)}, litvin={len(litvin_stickers)}, bred={len(bred_stickers)}")
-
+    logging.info(f"Готово: folk={len(ALL_STICKERS)} litvin={len(litvin_stickers)} bred={len(bred_stickers)}")
 
 def get_sticker_list_for_command(command):
     if command == "folk":
