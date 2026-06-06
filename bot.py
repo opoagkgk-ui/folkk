@@ -18,8 +18,8 @@ from telegram.ext import (
 )
 
 # ---------- НАСТРОЙКИ ----------
-TOKEN = "8891403100:AAGLU4dVDJWEsZFdmXGihyzbGUrGmUvDrcg"
-MINI_APP_URL = "https://jalal-p7p9.onrender.com"
+TOKEN = "ТВОЙ_ТОКЕН_ОТ_BOTFATHER"
+MINI_APP_URL = "https://folk-valley-miniapp.onrender.com"
 
 ADMIN_USERNAME = "xornid"
 
@@ -32,9 +32,9 @@ RANDOM_WORDS = [
 ]
 
 # ---------- ГЛОБАЛЬНЫЕ ДАННЫЕ ----------
-ALL_STICKERS = []          # объединённый пул для /folk и инлайна
-litvin_stickers = []       # для /litvin
-tihon_stickers = []        # для /tihon
+ALL_STICKERS = []
+litvin_stickers = []
+tihon_stickers = []
 
 cooldowns_folk = {}
 cooldowns_litvin = {}
@@ -43,8 +43,7 @@ cooldowns_tihon = {}
 chat_cooldowns = {}
 pending_cooldown_input = {}
 
-# Состояния для админки
-admin_state = {}  # {user_id: {"state": "adding_pack"/"editing_pack", "command": "folk"/"litvin"/"tihon", "pack_name": str, ...}}
+admin_state = {}
 
 USER_GROUPS_FILE = "user_groups.json"
 CONFIG_FILE = "sticker_config.json"
@@ -77,7 +76,6 @@ def save_user_groups():
 
 # ---------- КОНФИГУРАЦИЯ СТИКЕРОВ ----------
 def load_config():
-    """Загружает конфигурацию стикерпаков из JSON-файла."""
     default_config = {
         "commands": {
             "folk": [],
@@ -104,12 +102,10 @@ def save_config(config):
         logging.error(f"Ошибка сохранения конфига: {e}")
 
 async def load_stickers(app: Application):
-    """Загружает стикеры по текущему конфигу и заполняет глобальные списки."""
     global ALL_STICKERS, litvin_stickers, tihon_stickers
     config = load_config()
     commands_config = config.get("commands", {})
 
-    # Загружаем для каждой команды
     all_folk = []
     all_litvin = []
     all_tihon = []
@@ -143,6 +139,15 @@ async def load_stickers(app: Application):
     litvin_stickers = all_litvin
     tihon_stickers = all_tihon
     logging.info(f"Стикеры обновлены: folk={len(ALL_STICKERS)}, litvin={len(litvin_stickers)}, tihon={len(tihon_stickers)}")
+
+def get_sticker_list_for_command(command):
+    if command == "folk":
+        return ALL_STICKERS
+    elif command == "litvin":
+        return litvin_stickers
+    elif command == "tihon":
+        return tihon_stickers
+    return []
 
 # ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ КУЛДАУНА ----------
 def get_cd_duration(chat_id, command):
@@ -424,7 +429,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.inline_query.answer(results, cache_time=0)
 
-# ---------- ГЛОБАЛЬНАЯ АДМИН-ПАНЕЛЬ (УПРАВЛЕНИЕ СТИКЕРАМИ) ----------
+# ---------- ГЛОБАЛЬНАЯ АДМИН-ПАНЕЛЬ ----------
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.username != ADMIN_USERNAME:
@@ -471,15 +476,20 @@ async def admin_button_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     data = query.data
 
     if data == "admin_add_pack":
-        # Запрашиваем команду, потом название пака, потом remove_last
-        keyboard = [
-            [InlineKeyboardButton("Folk", callback_data="addpack_cmd:folk")],
-            [InlineKeyboardButton("Litvin", callback_data="addpack_cmd:litvin")],
-            [InlineKeyboardButton("Tihon", callback_data="addpack_cmd:tihon")],
-        ]
         await query.edit_message_text(
-            "Выберите команду, для которой добавляем стикерпак:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            "📝 **Добавление стикерпака**\n\n"
+            "Напишите в одном сообщении:\n"
+            "`<номер команды> <название пака> <сколько удалить с конца>`\n\n"
+            "Где номер команды:\n"
+            "`1` — /folk\n"
+            "`2` — /litvin\n"
+            "`3` — /tihon\n\n"
+            "Пример:\n"
+            "`2 FolkPack 2`\n"
+            "(добавит пак FolkPack в /litvin и удалит 2 последних стикера)\n\n"
+            "`1 MyPack 0`\n"
+            "(добавит пак MyPack в /folk, ничего не удаляя)",
+            parse_mode="Markdown"
         )
 
     elif data == "admin_show_config":
@@ -499,7 +509,6 @@ async def admin_button_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     elif data == "admin_remove_pack":
         config = load_config()
         keyboard = []
-        # Собираем все паки с указанием команды
         for cmd in ["folk", "litvin", "tihon"]:
             for idx, pack in enumerate(config["commands"][cmd]):
                 label = f"/{cmd}: {pack['pack_name']} (remove: {pack.get('remove_last',0)})"
@@ -563,7 +572,7 @@ async def admin_button_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             parse_mode="Markdown"
         )
 
-# ---------- ОБРАБОТКА ДОБАВЛЕНИЯ/УДАЛЕНИЯ/РЕДАКТИРОВАНИЯ ПАКОВ ----------
+# ---------- ОБРАБОТКА УДАЛЕНИЯ/РЕДАКТИРОВАНИЯ ПАКОВ ----------
 async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = query.from_user
@@ -573,14 +582,7 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     data = query.data
 
-    # Выбор команды для добавления пака
-    if data.startswith("addpack_cmd:"):
-        cmd = data.split(":")[1]
-        admin_state[user.id] = {"state": "waiting_pack_name", "command": cmd}
-        await query.edit_message_text(f"Введите short_name стикерпака (например, `MyPack`) для команды /{cmd}:", parse_mode="Markdown")
-
-    # Удаление пакета
-    elif data.startswith("removepack:"):
+    if data.startswith("removepack:"):
         _, cmd, idx = data.split(":")
         idx = int(idx)
         config = load_config()
@@ -592,7 +594,6 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception as e:
             await query.answer(f"Ошибка: {e}", show_alert=True)
 
-    # Изменение remove_last
     elif data.startswith("editremove:"):
         _, cmd, idx = data.split(":")
         idx = int(idx)
@@ -600,60 +601,55 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
         config = load_config()
         pack = config["commands"][cmd][idx]
         await query.edit_message_text(
-            f"Введите новое число удаляемых с конца стикеров для пака `{pack['pack_name']}` (0-???):"
+            f"Введите новое число удаляемых с конца стикеров для пака `{pack['pack_name']}` (0 или больше):",
+            parse_mode="Markdown"
         )
 
     await query.answer()
 
-# ---------- ОБРАБОТКА СООБЩЕНИЙ ОТ АДМИНА (ввод текста для состояний) ----------
+# ---------- ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ ОТ АДМИНА ----------
 async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if user.username != ADMIN_USERNAME or user.id not in admin_state:
+    if user.username != ADMIN_USERNAME:
+        return
+
+    text = update.message.text.strip()
+
+    # Проверяем формат "номер имя_пака число" для добавления пака
+    if update.effective_chat.type == "private" and user.id not in admin_state:
+        parts = text.split()
+        if len(parts) == 3 and parts[0] in ("1", "2", "3") and parts[2].isdigit():
+            cmd_map = {"1": "folk", "2": "litvin", "3": "tihon"}
+            cmd = cmd_map[parts[0]]
+            pack_name = parts[1]
+            remove_last = int(parts[2])
+            if remove_last < 0:
+                await update.message.reply_text("Число удаляемых стикеров не может быть отрицательным.")
+                return
+
+            config = load_config()
+            existing = [p for p in config["commands"][cmd] if p["pack_name"] == pack_name]
+            if existing:
+                await update.message.reply_text("Этот стикерпак уже привязан к данной команде.")
+                return
+
+            config["commands"][cmd].append({"pack_name": pack_name, "remove_last": remove_last})
+            save_config(config)
+            await load_stickers(context.application)
+            await update.message.reply_text(
+                f"✅ Пак `{pack_name}` добавлен к /{cmd} (удалено с конца: {remove_last}).\n"
+                f"Стикеров в команде теперь: {len(get_sticker_list_for_command(cmd))}",
+                parse_mode="Markdown"
+            )
+            return
+
+    # Если админ в состоянии ожидания
+    if user.id not in admin_state:
         return
 
     state = admin_state[user.id]
-    text = update.message.text.strip()
 
-    if state["state"] == "waiting_pack_name":
-        cmd = state["command"]
-        pack_name = text
-        # Спрашиваем remove_last
-        admin_state[user.id] = {"state": "waiting_remove_last_for_new", "command": cmd, "pack_name": pack_name}
-        await update.message.reply_text(
-            f"Сколько последних стикеров удалить из пака `{pack_name}`? (введите число, 0 — ничего не удалять):"
-        )
-
-    elif state["state"] == "waiting_remove_last_for_new":
-        cmd = state["command"]
-        pack_name = state["pack_name"]
-        try:
-            remove_last = int(text)
-            if remove_last < 0:
-                raise ValueError
-        except ValueError:
-            await update.message.reply_text("Введите целое неотрицательное число. Операция отменена.")
-            del admin_state[user.id]
-            return
-
-        config = load_config()
-        # Проверяем, нет ли уже такого пака в команде
-        existing = [p for p in config["commands"][cmd] if p["pack_name"] == pack_name]
-        if existing:
-            await update.message.reply_text("Этот стикерпак уже привязан к данной команде.")
-            del admin_state[user.id]
-            return
-
-        # Добавляем
-        config["commands"][cmd].append({"pack_name": pack_name, "remove_last": remove_last})
-        save_config(config)
-        await load_stickers(context.application)
-        await update.message.reply_text(
-            f"✅ Пак `{pack_name}` добавлен к /{cmd} (удалено с конца: {remove_last}).\n"
-            f"Стикеров в команде теперь: {len(get_sticker_list_for_command(cmd))}"
-        )
-        del admin_state[user.id]
-
-    elif state["state"] == "waiting_remove_last":
+    if state["state"] == "waiting_remove_last":
         cmd = state["command"]
         idx = state["index"]
         try:
@@ -672,21 +668,13 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_config(config)
             await load_stickers(context.application)
             await update.message.reply_text(
-                f"✅ Для пака `{pack['pack_name']}` (/ {cmd}) remove_last установлен на {remove_last}.\n"
-                f"Стикеры перезагружены."
+                f"✅ Для пака `{pack['pack_name']}` (/{cmd}) remove_last установлен на {remove_last}.\n"
+                f"Стикеры перезагружены.",
+                parse_mode="Markdown"
             )
         except IndexError:
             await update.message.reply_text("Пак не найден. Операция отменена.")
         del admin_state[user.id]
-
-def get_sticker_list_for_command(command):
-    if command == "folk":
-        return ALL_STICKERS
-    elif command == "litvin":
-        return litvin_stickers
-    elif command == "tihon":
-        return tihon_stickers
-    return []
 
 # ---------- FLASK ДЛЯ MINI APP ----------
 flask_app = Flask(__name__)
@@ -717,7 +705,6 @@ def main():
         default_config = {"commands": {"folk": [], "litvin": [], "tihon": []}}
         save_config(default_config)
 
-    # ВАЖНО: JobQueue требует установки python-telegram-bot[job-queue]
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -731,14 +718,13 @@ def main():
 
     # Порядок важен: сначала более специфичные паттерны
     app.add_handler(CallbackQueryHandler(cooldown_button_handler, pattern="^cooldown_select:"))
-    app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern="^(addpack_cmd|removepack|editremove):"))
+    app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern="^(removepack|editremove):"))
     app.add_handler(CallbackQueryHandler(admin_button_handler, pattern="^admin_"))
 
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_chat_members))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_cooldown_input), group=1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_text), group=2)
 
-    # Периодическое обновление групп (раз в 30 минут)
     app.job_queue.run_repeating(update_group_info, interval=1800, first=60)
 
     import asyncio
