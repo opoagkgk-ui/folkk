@@ -178,6 +178,78 @@ async def load_stickers(app: Application):
 
         if command == "folk":
             all_folk = stickers_list
+        elif command == "lasync def load_stickers(app: Application):
+    global ALL_STICKERS, litvin_stickers, bred_stickers
+    config = load_config()
+    commands_config = config.get("commands", {})
+    logging.info(f"Загружен конфиг: {json.dumps(commands_config, indent=2)}")
+
+    all_packs = []
+    for cmd, packs in commands_config.items():
+        for entry in packs:
+            all_packs.append((cmd, entry.get("pack_name")))
+
+    me = await app.bot.get_me()
+    logging.info(f"Бот ID: {me.id}")
+
+    # Знакомим бота с каждым паком
+    for cmd, pack_name in all_packs:
+        logging.info(f"Обрабатываю пак: {pack_name} для /{cmd}")
+        try:
+            data = await app.bot._post("getStickerSet", {"name": pack_name})
+            logging.info(f"API ответ для {pack_name}: ok={data.get('ok')}, количество={len(data.get('result', {}).get('stickers', []))}")
+            
+            if data and data.get("ok"):
+                stickers_raw = data["result"].get("stickers", [])
+                first_sticker = None
+                for s in stickers_raw:
+                    is_video = s.get("is_video", False)
+                    is_anim = s.get("is_animated", False)
+                    logging.info(f"  Стикер: file_id={s.get('file_id','?')[:20]}..., is_video={is_video}, is_animated={is_anim}")
+                    if not is_video and not is_anim:
+                        first_sticker = s
+                        break
+                
+                if first_sticker:
+                    await app.bot.send_sticker(chat_id=me.id, sticker=first_sticker["file_id"])
+                    logging.info(f"  ✅ Пак {pack_name} добавлен")
+                else:
+                    logging.warning(f"  ⚠️ Пак {pack_name}: нет обычных стикеров")
+            else:
+                logging.error(f"  ❌ Пак {pack_name}: API ошибка - {data}")
+        except Exception as e:
+            logging.error(f"  ❌ Пак {pack_name}: исключение - {e}")
+
+    # Загружаем стикеры
+    all_folk, all_litvin, all_bred = [], [], []
+
+    for command, packs in commands_config.items():
+        stickers_list = []
+        for entry in packs:
+            pack_name = entry.get("pack_name")
+            remove_last = int(entry.get("remove_last", 0))
+            logging.info(f"Загружаю {pack_name} для /{command}, remove_last={remove_last}")
+            try:
+                data = await app.bot._post("getStickerSet", {"name": pack_name})
+                if data and data.get("ok"):
+                    stickers_raw = data["result"].get("stickers", [])
+                    stickers = [
+                        s["file_id"] for s in stickers_raw 
+                        if s.get("file_id") and not s.get("is_video") and not s.get("is_animated")
+                    ]
+                    logging.info(f"  Найдено обычных стикеров: {len(stickers)} из {len(stickers_raw)} всего")
+                    
+                    if remove_last > 0 and len(stickers) > remove_last:
+                        stickers = stickers[:-remove_last]
+                        logging.info(f"  После удаления {remove_last} с конца: {len(stickers)}")
+                    
+                    stickers_list.extend(stickers)
+                    logging.info(f"  ✅ Добавлено {len(stickers)} стикеров")
+            except Exception as e:
+                logging.error(f"  ❌ Ошибка загрузки {pack_name}: {e}")
+
+        if command == "folk":
+            all_folk = stickers_list
         elif command == "litvin":
             all_litvin = stickers_list
         elif command == "bred":
@@ -186,7 +258,8 @@ async def load_stickers(app: Application):
     ALL_STICKERS = all_folk
     litvin_stickers = all_litvin
     bred_stickers = all_bred
-    logging.info(f"Готово: folk={len(ALL_STICKERS)} litvin={len(litvin_stickers)} bred={len(bred_stickers)}")
+    logging.info(f"✅ ИТОГО: folk={len(ALL_STICKERS)} litvin={len(litvin_stickers)} bred={len(bred_stickers)}")
+
 
 def get_sticker_list_for_command(command):
     if command == "folk":
