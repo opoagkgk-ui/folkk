@@ -2,17 +2,16 @@ import logging
 import random
 import json
 import os
+import asyncio
 import threading
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from telegram import Update, InlineQueryResultCachedSticker, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
-from telegram.constants import ChatMemberStatus
 from telegram.ext import (
     Application,
     CommandHandler,
     InlineQueryHandler,
     CallbackQueryHandler,
-    MessageHandler,
     ContextTypes,
     filters,
 )
@@ -20,7 +19,6 @@ from telegram.ext import (
 # ---------- НАСТРОЙКИ ----------
 TOKEN = "8891403100:AAGLU4dVDJWEsZFdmXGihyzbGUrGmUvDrcg"
 MINI_APP_URL = "https://jalal-p7p9.onrender.com"
-
 ADMIN_USERNAME = "xornid"
 
 RANDOM_WORDS = [
@@ -30,6 +28,12 @@ RANDOM_WORDS = [
     "подушка", "кактус", "утюг", "закат", "шнурок", "лампочка", "кнопка",
     "огурец", "микрофон", "самокат", "трамвай", "облако", "одуван"
 ]
+
+# ---------- ЛОГИ ----------
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
 
 # ---------- ГЛОБАЛЬНЫЕ ДАННЫЕ ----------
 ALL_STICKERS = []
@@ -43,15 +47,8 @@ cooldowns_bred = {}
 chat_cooldowns = {}
 pending_cooldown_input = {}
 
-admin_state = {}
-
 USER_GROUPS_FILE = "user_groups.json"
 user_groups = {}
-
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
 
 # ---------- ЗАГРУЗКА/СОХРАНЕНИЕ ГРУПП ----------
 def load_user_groups():
@@ -59,8 +56,7 @@ def load_user_groups():
     if os.path.exists(USER_GROUPS_FILE):
         try:
             with open(USER_GROUPS_FILE, 'r', encoding='utf-8') as f:
-                raw = json.load(f)
-                user_groups = {int(k): v for k, v in raw.items()}
+                user_groups = {int(k): v for k, v in json.load(f).items()}
         except:
             user_groups = {}
 
@@ -71,7 +67,7 @@ def save_user_groups():
     except:
         pass
 
-# ---------- ЗАГРУЗКА СТИКЕРОВ (ПРОСТАЯ ВЕРСИЯ) ----------
+# ---------- СТИКЕРПАКИ ----------
 STICKER_PACKS = {
     "folk": [
         ("ByFolkValley", 0),
@@ -87,28 +83,29 @@ STICKER_PACKS = {
     ],
 }
 
+# ---------- ЗАГРУЗКА СТИКЕРОВ (ПРОВЕРЕННАЯ ВЕРСИЯ) ----------
 async def load_stickers(app: Application):
     global ALL_STICKERS, litvin_stickers, bred_stickers
 
-    all_folk = []
-    all_litvin = []
-    all_bred = []
+    all_folk, all_litvin, all_bred = [], [], []
 
     for command, packs in STICKER_PACKS.items():
         for pack_name, remove_last in packs:
             try:
                 pack = await app.bot.get_sticker_set(pack_name)
                 stickers = [s.file_id for s in pack.stickers]
+
                 if remove_last > 0 and len(stickers) > remove_last:
                     stickers = stickers[:-remove_last]
-                
+                    logging.info(f"Пак {pack_name}: удалено {remove_last} с конца")
+
                 if command == "folk":
                     all_folk.extend(stickers)
                 elif command == "litvin":
                     all_litvin.extend(stickers)
                 elif command == "bred":
                     all_bred.extend(stickers)
-                
+
                 logging.info(f"Пак {pack_name} -> /{command}, +{len(stickers)} стикеров")
             except Exception as e:
                 logging.error(f"Не удалось загрузить {pack_name}: {e}")
@@ -116,67 +113,33 @@ async def load_stickers(app: Application):
     ALL_STICKERS = all_folk
     litvin_stickers = all_litvin
     bred_stickers = all_bred
-    logging.info(f"Готово: folk={len(ALL_STICKERS)} litvin={len(litvin_stickers)} bred={len(bred_stickers)}")
+    logging.info(f"Всего: folk={len(ALL_STICKERS)} litvin={len(litvin_stickers)} bred={len(bred_stickers)}")
 
-# ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ КУЛДАУНА ----------
-def get_cd_duration(chat_id, command):
+# ---------- КУЛДАУНЫ ----------
+def get_cd(chat_id, command):
     if chat_id not in chat_cooldowns:
         chat_cooldowns[chat_id] = {'folk': 300, 'litvin': 300, 'bred': 300}
     return chat_cooldowns[chat_id].get(command, 300)
 
-def get_cooldown_dict(command):
+def get_cd_dict(command):
     if command == 'folk': return cooldowns_folk
     elif command == 'litvin': return cooldowns_litvin
-    elif command == 'bred': return cooldowns_bred
-    return {}
+    return cooldowns_bred
 
-def is_cooling(chat_id, user_id, command):
-    duration = get_cd_duration(chat_id, command)
+def check_cd(chat_id, user_id, command):
+    duration = get_cd(chat_id, command)
     if duration == 0:
         return False, None
-    cd_dict = get_cooldown_dict(command)
+    cd = get_cd_dict(command)
     key = (chat_id, user_id)
     now = datetime.now()
-    if key in cd_dict and (now - cd_dict[key]) < timedelta(seconds=duration):
-        remain = cd_dict[key] + timedelta(seconds=duration) - now
+    if key in cd and (now - cd[key]) < timedelta(seconds=duration):
+        remain = cd[key] + timedelta(seconds=duration) - now
         return True, remain
     return False, None
 
-def set_cooldown_used(chat_id, user_id, command):
-    cd_dict = get_cooldown_dict(command)
-    cd_dict[(chat_id, user_id)] = datetime.now()
-
-# ---------- ОБРАБОТКА ДОБАВЛЕНИЯ В ГРУППУ ----------
-async def on_new_chat_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    bot_id = context.bot.id
-    for member in update.message.new_chat_members:
-        if member.id == bot_id:
-            logging.info(f"Бот добавлен в чат: {chat.title} ({chat.id})")
-            try:
-                admins = await context.bot.get_chat_administrators(chat.id)
-                creator_id = None
-                for admin in admins:
-                    if admin.status == ChatMemberStatus.OWNER:
-                        creator_id = admin.user.id
-                        break
-                if creator_id:
-                    group_info = {
-                        "chat_id": chat.id,
-                        "title": chat.title or "Без названия",
-                        "member_count": 0,
-                        "invite_link": None,
-                        "photo_url": None
-                    }
-                    if creator_id not in user_groups:
-                        user_groups[creator_id] = []
-                    existing = [g for g in user_groups[creator_id] if g["chat_id"] == chat.id]
-                    if not existing:
-                        user_groups[creator_id].append(group_info)
-                        save_user_groups()
-                        logging.info(f"Группа '{chat.title}' сохранена для {creator_id}")
-            except Exception as e:
-                logging.error(f"Ошибка сохранения группы: {e}")
+def use_cd(chat_id, user_id, command):
+    get_cd_dict(command)[(chat_id, user_id)] = datetime.now()
 
 # ---------- КОМАНДЫ ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -184,159 +147,131 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("👤 Профиль", web_app=WebAppInfo(url=MINI_APP_URL))]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         text = (
-            "👋 Привет! Я бот с мемными стикерами Folk Valley.\n\n"
-            "• В любом чате введи @folkvalleybot — я отправлю случайный стикер.\n"
-            "• В группе: /folk, /litvin, /bred, /sosat, /cooldown\n\n"
-            "👤 Кнопка «Профиль» — Mini App с группами."
+            "👋 Привет! Я бот Folk Valley.\n\n"
+            "• @folkvalleybot в любом чате — случайный стикер\n"
+            "• /folk, /litvin, /bred — стикеры\n"
+            "• /sosat — бессвязный бред\n"
+            "• /cooldown — настройка кулдаунов (владелец группы)"
         )
         await update.message.reply_text(text, reply_markup=reply_markup)
     else:
-        text = "Я в группе! /folk, /litvin, /bred, /sosat, /cooldown"
-        await update.message.reply_text(text)
+        await update.message.reply_text("Я в группе! /folk /litvin /bred /sosat /cooldown")
 
 async def folk(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    is_cool, remain = is_cooling(chat_id, user_id, 'folk')
-    if is_cool:
-        mins, secs = divmod(remain.seconds, 60)
-        await update.message.reply_text(f"⏳ Подожди ещё {mins} мин. {secs} сек.", quote=True)
+    chat_id, user_id = update.effective_chat.id, update.effective_user.id
+    cool, remain = check_cd(chat_id, user_id, 'folk')
+    if cool:
+        m, s = divmod(remain.seconds, 60)
+        await update.message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
         return
     if not ALL_STICKERS:
-        await update.message.reply_text("Стикеры пока не загружены. Попробуй позже.")
+        await update.message.reply_text("Стикеры не загружены.")
         return
-    sticker_id = random.choice(ALL_STICKERS)
-    await update.message.reply_sticker(sticker=sticker_id)
-    set_cooldown_used(chat_id, user_id, 'folk')
+    await update.message.reply_sticker(sticker=random.choice(ALL_STICKERS))
+    use_cd(chat_id, user_id, 'folk')
 
 async def litvin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    is_cool, remain = is_cooling(chat_id, user_id, 'litvin')
-    if is_cool:
-        mins, secs = divmod(remain.seconds, 60)
-        await update.message.reply_text(f"⏳ Подожди ещё {mins} мин. {secs} сек.", quote=True)
+    chat_id, user_id = update.effective_chat.id, update.effective_user.id
+    cool, remain = check_cd(chat_id, user_id, 'litvin')
+    if cool:
+        m, s = divmod(remain.seconds, 60)
+        await update.message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
         return
     if not litvin_stickers:
-        await update.message.reply_text("Стикеры пока не загружены.")
+        await update.message.reply_text("Стикеры не загружены.")
         return
-    sticker_id = random.choice(litvin_stickers)
-    await update.message.reply_sticker(sticker=sticker_id)
-    set_cooldown_used(chat_id, user_id, 'litvin')
+    await update.message.reply_sticker(sticker=random.choice(litvin_stickers))
+    use_cd(chat_id, user_id, 'litvin')
 
 async def bred(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    is_cool, remain = is_cooling(chat_id, user_id, 'bred')
-    if is_cool:
-        mins, secs = divmod(remain.seconds, 60)
-        await update.message.reply_text(f"⏳ Подожди ещё {mins} мин. {secs} сек.", quote=True)
+    chat_id, user_id = update.effective_chat.id, update.effective_user.id
+    cool, remain = check_cd(chat_id, user_id, 'bred')
+    if cool:
+        m, s = divmod(remain.seconds, 60)
+        await update.message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
         return
     if not bred_stickers:
-        await update.message.reply_text("Стикеры пока не загружены.")
+        await update.message.reply_text("Стикеры не загружены.")
         return
-    sticker_id = random.choice(bred_stickers)
-    await update.message.reply_sticker(sticker=sticker_id)
-    set_cooldown_used(chat_id, user_id, 'bred')
+    await update.message.reply_sticker(sticker=random.choice(bred_stickers))
+    use_cd(chat_id, user_id, 'bred')
 
 async def sosat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    count = random.randint(3, 6)
-    words = random.choices(RANDOM_WORDS, k=count)
+    words = random.choices(RANDOM_WORDS, k=random.randint(3, 6))
     await update.message.reply_text(" ".join(words))
 
-# ---------- КУЛДАУНЫ ----------
-async def cooldown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    user = update.effective_user
+# ---------- КУЛДАУН КОМАНДА ----------
+async def cooldown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat, user = update.effective_chat, update.effective_user
     if chat.type not in ("group", "supergroup"):
-        await update.message.reply_text("Только для групп.")
+        await update.message.reply_text("Только в группах.")
         return
     try:
         admins = await context.bot.get_chat_administrators(chat.id)
+        owner = next((a for a in admins if a.status == "creator"), None)
+        if not owner or user.id != owner.user.id:
+            await update.message.reply_text("Только создатель группы.")
+            return
     except:
-        await update.message.reply_text("Бот должен быть админом.")
-        return
-    creator_id = None
-    for admin in admins:
-        if admin.status == ChatMemberStatus.OWNER:
-            creator_id = admin.user.id
-            break
-    if user.id != creator_id:
-        await update.message.reply_text("Только создатель группы.")
+        await update.message.reply_text("Бот должен быть администратором.")
         return
 
-    folk_cd = get_cd_duration(chat.id, 'folk')
-    litvin_cd = get_cd_duration(chat.id, 'litvin')
-    bred_cd = get_cd_duration(chat.id, 'bred')
-    text = f"⚙️ Кулдауны:\n/folk: {folk_cd}с\n/litvin: {litvin_cd}с\n/bred: {bred_cd}с\n\nВыбери команду:"
-    keyboard = [
-        [InlineKeyboardButton(f"Folk ({folk_cd}с)", callback_data="cd:folk")],
-        [InlineKeyboardButton(f"Litvin ({litvin_cd}с)", callback_data="cd:litvin")],
-        [InlineKeyboardButton(f"Bred ({bred_cd}с)", callback_data="cd:bred")],
+    f, l, b = get_cd(chat.id, 'folk'), get_cd(chat.id, 'litvin'), get_cd(chat.id, 'bred')
+    kb = [
+        [InlineKeyboardButton(f"Folk ({f}с)", callback_data="cd:folk")],
+        [InlineKeyboardButton(f"Litvin ({l}с)", callback_data="cd:litvin")],
+        [InlineKeyboardButton(f"Bred ({b}с)", callback_data="cd:bred")],
     ]
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text(
+        f"⚙️ Кулдауны:\n/fold: {f}с\n/litvin: {l}с\n/bred: {b}с\n\nВыбери команду:",
+        reply_markup=InlineKeyboardMarkup(kb)
+    )
 
-async def cooldown_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    chat_id = query.message.chat_id
-    try:
-        admins = await context.bot.get_chat_administrators(chat_id)
-    except:
-        await query.answer("Бот должен быть админом.", show_alert=True)
-        return
-    creator_id = None
-    for admin in admins:
-        if admin.status == ChatMemberStatus.OWNER:
-            creator_id = admin.user.id
-            break
-    if user.id != creator_id:
-        await query.answer("Только создатель.", show_alert=True)
-        return
-    command = query.data.split(":")[1]
-    pending_cooldown_input[(chat_id, user.id)] = command
-    await query.answer()
-    await query.edit_message_text(f"Введи кулдаун для /{command} в секундах (0-3600):")
+async def cd_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    chat_id, user = q.message.chat_id, q.from_user
+    cmd = q.data.split(":")[1]
+    pending_cooldown_input[(chat_id, user.id)] = cmd
+    await q.answer()
+    await q.edit_message_text(f"Введи новый кулдаун для /{cmd} (0-3600 секунд):")
 
-async def handle_cooldown_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    chat_id = update.effective_chat.id
-    key = (chat_id, user.id)
+async def cd_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    key = (update.effective_chat.id, update.effective_user.id)
     if key not in pending_cooldown_input:
         return
-    command = pending_cooldown_input.pop(key)
+    cmd = pending_cooldown_input.pop(key)
     text = update.message.text.strip()
     if not text.isdigit():
         await update.message.reply_text("Нужно число. Отмена.")
         return
-    seconds = int(text)
-    if not 0 <= seconds <= 3600:
+    sec = int(text)
+    if not 0 <= sec <= 3600:
         await update.message.reply_text("0-3600. Отмена.")
         return
-    if chat_id not in chat_cooldowns:
-        chat_cooldowns[chat_id] = {}
-    chat_cooldowns[chat_id][command] = seconds
-    await update.message.reply_text(f"✅ /{command}: {seconds}с")
+    if update.effective_chat.id not in chat_cooldowns:
+        chat_cooldowns[update.effective_chat.id] = {}
+    chat_cooldowns[update.effective_chat.id][cmd] = sec
+    await update.message.reply_text(f"✅ /{cmd}: {sec}с")
 
 # ---------- ИНЛАЙН ----------
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not ALL_STICKERS:
         await update.inline_query.answer([], cache_time=0)
         return
-    sticker_id = random.choice(ALL_STICKERS)
-    results = [InlineQueryResultCachedSticker(id=str(random.randint(100000, 999999)), sticker_file_id=sticker_id)]
-    await update.inline_query.answer(results, cache_time=0)
+    sid = random.choice(ALL_STICKERS)
+    await update.inline_query.answer([
+        InlineQueryResultCachedSticker(id=str(random.randint(100000, 999999)), sticker_file_id=sid)
+    ], cache_time=0)
 
 # ---------- FLASK ----------
 flask_app = Flask(__name__)
 
 @flask_app.route('/getUserGroups')
 def get_user_groups():
-    user_id = request.args.get('user_id')
-    if not user_id:
+    uid = request.args.get('user_id')
+    if not uid:
         return jsonify({"ok": False})
-    groups = user_groups.get(int(user_id), [])
-    return jsonify({"ok": True, "result": groups})
+    return jsonify({"ok": True, "result": user_groups.get(int(uid), [])})
 
 def run_flask():
     flask_app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
@@ -351,13 +286,11 @@ def main():
     app.add_handler(CommandHandler("litvin", litvin))
     app.add_handler(CommandHandler("bred", bred))
     app.add_handler(CommandHandler("sosat", sosat))
-    app.add_handler(CommandHandler("cooldown", cooldown_command))
+    app.add_handler(CommandHandler("cooldown", cooldown_cmd))
     app.add_handler(InlineQueryHandler(inline_query))
-    app.add_handler(CallbackQueryHandler(cooldown_button, pattern="^cd:"))
-    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_chat_members))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_cooldown_input))
+    app.add_handler(CallbackQueryHandler(cd_button, pattern="^cd:"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cd_input))
 
-    import asyncio
     loop = asyncio.get_event_loop()
     loop.run_until_complete(load_stickers(app))
 
@@ -366,4 +299,4 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    main() 
