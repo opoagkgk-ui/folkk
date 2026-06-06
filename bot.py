@@ -34,11 +34,11 @@ RANDOM_WORDS = [
 # ---------- ГЛОБАЛЬНЫЕ ДАННЫЕ ----------
 ALL_STICKERS = []
 litvin_stickers = []
-bred_stickers = []          # бывший tihon
+bred_stickers = []
 
 cooldowns_folk = {}
 cooldowns_litvin = {}
-cooldowns_bred = {}         # бывший tihon
+cooldowns_bred = {}
 
 chat_cooldowns = {}
 pending_cooldown_input = {}
@@ -46,7 +46,6 @@ pending_cooldown_input = {}
 admin_state = {}
 
 USER_GROUPS_FILE = "user_groups.json"
-CONFIG_FILE = "sticker_config.json"
 user_groups = {}
 
 logging.basicConfig(
@@ -62,213 +61,62 @@ def load_user_groups():
             with open(USER_GROUPS_FILE, 'r', encoding='utf-8') as f:
                 raw = json.load(f)
                 user_groups = {int(k): v for k, v in raw.items()}
-            logging.info(f"Загружено групп пользователей: {sum(len(v) for v in user_groups.values())}")
-        except Exception as e:
-            logging.warning(f"Не удалось загрузить user_groups.json: {e}")
+        except:
             user_groups = {}
 
 def save_user_groups():
     try:
         with open(USER_GROUPS_FILE, 'w', encoding='utf-8') as f:
             json.dump(user_groups, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logging.error(f"Не удалось сохранить user_groups.json: {e}")
+    except:
+        pass
 
-# ---------- КОНФИГУРАЦИЯ СТИКЕРОВ ----------
-def load_config():
-    default_config = {
-        "commands": {
-            "folk": [
-                {"pack_name": "ByFolkValley", "remove_last": 0},
-                {"pack_name": "AtlasScottishFold", "remove_last": 0},
-                {"pack_name": "Vooocaaa_by_fStikBot", "remove_last": 2}
-            ],
-            "litvin": [
-                {"pack_name": "pk_2746611_by_Ctikerubot", "remove_last": 2}
-            ],
-            "bred": [
-                {"pack_name": "DouBlya", "remove_last": 0},
-                {"pack_name": "Fartsmopington_by_MoiStikiBot", "remove_last": 0}
-            ]
-        }
-    }
-    if not os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(default_config, f, ensure_ascii=False, indent=2)
-        return default_config
-    try:
-        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            loaded = json.load(f)
-            if "tihon" in loaded.get("commands", {}):
-                loaded["commands"]["bred"] = loaded["commands"].pop("tihon")
-            return loaded
-    except Exception as e:
-        logging.error(f"Ошибка загрузки конфига: {e}")
-        return default_config
-
-
-def save_config(config):
-    try:
-        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(config, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logging.error(f"Ошибка сохранения конфига: {e}")
-
+# ---------- ЗАГРУЗКА СТИКЕРОВ (ПРОСТАЯ ВЕРСИЯ) ----------
+STICKER_PACKS = {
+    "folk": [
+        ("ByFolkValley", 0),
+        ("AtlasScottishFold", 0),
+        ("Vooocaaa_by_fStikBot", 2),
+    ],
+    "litvin": [
+        ("pk_2746611_by_Ctikerubot", 2),
+    ],
+    "bred": [
+        ("DouBlya", 0),
+        ("Fartsmopington_by_MoiStikiBot", 0),
+    ],
+}
 
 async def load_stickers(app: Application):
     global ALL_STICKERS, litvin_stickers, bred_stickers
-    config = load_config()
-    commands_config = config.get("commands", {})
 
-    all_packs = []
-    for cmd_packs in commands_config.values():
-        for entry in cmd_packs:
-            all_packs.append(entry.get("pack_name"))
+    all_folk = []
+    all_litvin = []
+    all_bred = []
 
-    me = await app.bot.get_me()
-
-    # Знакомим бота с каждым паком
-    for pack_name in set(all_packs):
-        try:
-            # Используем сырой запрос к API
-            data = await app.bot._post("getStickerSet", {"name": pack_name})
-            if data and data.get("ok"):
-                stickers_raw = data["result"].get("stickers", [])
-                # Берём только первый НЕ видео стикер
-                first_sticker = None
-                for s in stickers_raw:
-                    if not s.get("is_video") and not s.get("is_animated"):
-                        first_sticker = s
-                        break
-                if first_sticker:
-                    await app.bot.send_sticker(chat_id=me.id, sticker=first_sticker["file_id"])
-                    logging.info(f"Пак {pack_name} успешно добавлен")
-                else:
-                    logging.warning(f"Пак {pack_name}: нет обычных стикеров (только видео/анимированные)")
-            else:
-                logging.warning(f"Пак {pack_name}: API вернул ошибку")
-        except Exception as e:
-            logging.error(f"Не удалось добавить пак {pack_name}: {e}")
-
-    # Загружаем стикеры
-    all_folk, all_litvin, all_bred = [], [], []
-
-    for command, packs in commands_config.items():
-        stickers_list = []
-        for entry in packs:
-            pack_name = entry.get("pack_name")
-            remove_last = int(entry.get("remove_last", 0))
+    for command, packs in STICKER_PACKS.items():
+        for pack_name, remove_last in packs:
             try:
-                data = await app.bot._post("getStickerSet", {"name": pack_name})
-                if data and data.get("ok"):
-                    stickers_raw = data["result"].get("stickers", [])
-                    # Фильтруем: только обычные стикеры (не видео, не анимированные)
-                    stickers = [
-                        s["file_id"] for s in stickers_raw 
-                        if s.get("file_id") and not s.get("is_video") and not s.get("is_animated")
-                    ]
-                    if remove_last > 0 and len(stickers) > remove_last:
-                        stickers = stickers[:-remove_last]
-                    stickers_list.extend(stickers)
-                    logging.info(f"Пак {pack_name} → /{command}, +{len(stickers)} стикеров")
-                else:
-                    logging.error(f"Пак {pack_name}: API error")
-            except Exception as e:
-                logging.error(f"Пак {pack_name}: {e}")
-
-        if command == "folk":
-            all_folk = stickers_list
-        elif command == "lasync def load_stickers(app: Application):
-    global ALL_STICKERS, litvin_stickers, bred_stickers
-    config = load_config()
-    commands_config = config.get("commands", {})
-    logging.info(f"Загружен конфиг: {json.dumps(commands_config, indent=2)}")
-
-    all_packs = []
-    for cmd, packs in commands_config.items():
-        for entry in packs:
-            all_packs.append((cmd, entry.get("pack_name")))
-
-    me = await app.bot.get_me()
-    logging.info(f"Бот ID: {me.id}")
-
-    # Знакомим бота с каждым паком
-    for cmd, pack_name in all_packs:
-        logging.info(f"Обрабатываю пак: {pack_name} для /{cmd}")
-        try:
-            data = await app.bot._post("getStickerSet", {"name": pack_name})
-            logging.info(f"API ответ для {pack_name}: ok={data.get('ok')}, количество={len(data.get('result', {}).get('stickers', []))}")
-            
-            if data and data.get("ok"):
-                stickers_raw = data["result"].get("stickers", [])
-                first_sticker = None
-                for s in stickers_raw:
-                    is_video = s.get("is_video", False)
-                    is_anim = s.get("is_animated", False)
-                    logging.info(f"  Стикер: file_id={s.get('file_id','?')[:20]}..., is_video={is_video}, is_animated={is_anim}")
-                    if not is_video and not is_anim:
-                        first_sticker = s
-                        break
+                pack = await app.bot.get_sticker_set(pack_name)
+                stickers = [s.file_id for s in pack.stickers]
+                if remove_last > 0 and len(stickers) > remove_last:
+                    stickers = stickers[:-remove_last]
                 
-                if first_sticker:
-                    await app.bot.send_sticker(chat_id=me.id, sticker=first_sticker["file_id"])
-                    logging.info(f"  ✅ Пак {pack_name} добавлен")
-                else:
-                    logging.warning(f"  ⚠️ Пак {pack_name}: нет обычных стикеров")
-            else:
-                logging.error(f"  ❌ Пак {pack_name}: API ошибка - {data}")
-        except Exception as e:
-            logging.error(f"  ❌ Пак {pack_name}: исключение - {e}")
-
-    # Загружаем стикеры
-    all_folk, all_litvin, all_bred = [], [], []
-
-    for command, packs in commands_config.items():
-        stickers_list = []
-        for entry in packs:
-            pack_name = entry.get("pack_name")
-            remove_last = int(entry.get("remove_last", 0))
-            logging.info(f"Загружаю {pack_name} для /{command}, remove_last={remove_last}")
-            try:
-                data = await app.bot._post("getStickerSet", {"name": pack_name})
-                if data and data.get("ok"):
-                    stickers_raw = data["result"].get("stickers", [])
-                    stickers = [
-                        s["file_id"] for s in stickers_raw 
-                        if s.get("file_id") and not s.get("is_video") and not s.get("is_animated")
-                    ]
-                    logging.info(f"  Найдено обычных стикеров: {len(stickers)} из {len(stickers_raw)} всего")
-                    
-                    if remove_last > 0 and len(stickers) > remove_last:
-                        stickers = stickers[:-remove_last]
-                        logging.info(f"  После удаления {remove_last} с конца: {len(stickers)}")
-                    
-                    stickers_list.extend(stickers)
-                    logging.info(f"  ✅ Добавлено {len(stickers)} стикеров")
+                if command == "folk":
+                    all_folk.extend(stickers)
+                elif command == "litvin":
+                    all_litvin.extend(stickers)
+                elif command == "bred":
+                    all_bred.extend(stickers)
+                
+                logging.info(f"Пак {pack_name} -> /{command}, +{len(stickers)} стикеров")
             except Exception as e:
-                logging.error(f"  ❌ Ошибка загрузки {pack_name}: {e}")
-
-        if command == "folk":
-            all_folk = stickers_list
-        elif command == "litvin":
-            all_litvin = stickers_list
-        elif command == "bred":
-            all_bred = stickers_list
+                logging.error(f"Не удалось загрузить {pack_name}: {e}")
 
     ALL_STICKERS = all_folk
     litvin_stickers = all_litvin
     bred_stickers = all_bred
-    logging.info(f"✅ ИТОГО: folk={len(ALL_STICKERS)} litvin={len(litvin_stickers)} bred={len(bred_stickers)}")
-
-
-def get_sticker_list_for_command(command):
-    if command == "folk":
-        return ALL_STICKERS
-    elif command == "litvin":
-        return litvin_stickers
-    elif command == "bred":
-        return bred_stickers
-    return []
+    logging.info(f"Готово: folk={len(ALL_STICKERS)} litvin={len(litvin_stickers)} bred={len(bred_stickers)}")
 
 # ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ КУЛДАУНА ----------
 def get_cd_duration(chat_id, command):
@@ -277,12 +125,9 @@ def get_cd_duration(chat_id, command):
     return chat_cooldowns[chat_id].get(command, 300)
 
 def get_cooldown_dict(command):
-    if command == 'folk':
-        return cooldowns_folk
-    elif command == 'litvin':
-        return cooldowns_litvin
-    elif command == 'bred':
-        return cooldowns_bred
+    if command == 'folk': return cooldowns_folk
+    elif command == 'litvin': return cooldowns_litvin
+    elif command == 'bred': return cooldowns_bred
     return {}
 
 def is_cooling(chat_id, user_id, command):
@@ -319,85 +164,34 @@ async def on_new_chat_members(update: Update, context: ContextTypes.DEFAULT_TYPE
                     group_info = {
                         "chat_id": chat.id,
                         "title": chat.title or "Без названия",
-                        "member_count": await chat.get_member_count() if hasattr(chat, 'get_member_count') else 0,
+                        "member_count": 0,
                         "invite_link": None,
                         "photo_url": None
                     }
-                    try:
-                        chat_obj = await context.bot.get_chat(chat.id)
-                        if chat_obj.photo:
-                            photo_file = await context.bot.get_file(chat_obj.photo.big_file_id)
-                            group_info["photo_url"] = photo_file.file_path
-                    except:
-                        pass
-                    try:
-                        invite = await context.bot.create_chat_invite_link(
-                            chat.id, name="Folk Valley Bot", creates_join_request=False
-                        )
-                        group_info["invite_link"] = invite.invite_link
-                    except:
-                        pass
                     if creator_id not in user_groups:
                         user_groups[creator_id] = []
                     existing = [g for g in user_groups[creator_id] if g["chat_id"] == chat.id]
                     if not existing:
                         user_groups[creator_id].append(group_info)
                         save_user_groups()
-                        logging.info(f"Группа '{chat.title}' сохранена для пользователя {creator_id}")
+                        logging.info(f"Группа '{chat.title}' сохранена для {creator_id}")
             except Exception as e:
-                logging.error(f"Ошибка при сохранении группы: {e}")
-
-async def update_group_info(context: ContextTypes.DEFAULT_TYPE):
-    updated = False
-    for uid, groups in list(user_groups.items()):
-        for group in groups:
-            try:
-                chat = await context.bot.get_chat(group["chat_id"])
-                new_title = chat.title or group["title"]
-                new_count = await chat.get_member_count() if hasattr(chat, 'get_member_count') else group.get("member_count", 0)
-                if new_title != group.get("title") or new_count != group.get("member_count"):
-                    group["title"] = new_title
-                    group["member_count"] = new_count
-                    updated = True
-                if chat.photo:
-                    photo_file = await context.bot.get_file(chat.photo.big_file_id)
-                    group["photo_url"] = photo_file.file_path
-            except:
-                continue
-    if updated:
-        save_user_groups()
+                logging.error(f"Ошибка сохранения группы: {e}")
 
 # ---------- КОМАНДЫ ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
-        keyboard = [
-            [InlineKeyboardButton("👤 Профиль", web_app=WebAppInfo(url=MINI_APP_URL))]
-        ]
+        keyboard = [[InlineKeyboardButton("👤 Профиль", web_app=WebAppInfo(url=MINI_APP_URL))]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         text = (
             "👋 Привет! Я бот с мемными стикерами Folk Valley.\n\n"
-            "Как использовать:\n"
-            "• В любом чате введи @folkvalleybot и нажми на появившийся стикер — я отправлю его.\n"
-            "  (Каждый раз стикер случайный!)\n"
-            "• В группе работают команды:\n"
-            "  /folk — случайный стикер\n"
-            "  /litvin — случайный стикер\n"
-            "  /bred — случайный стикер\n"
-            "  /sosat — бессвязный бред\n"
-            "  /cooldown — настройка кулдаунов (владелец)\n\n"
-            "👤 Кнопка «Профиль» откроет Mini App с вашими группами.\n\n"
-            "Наслаждайся вайбом!"
+            "• В любом чате введи @folkvalleybot — я отправлю случайный стикер.\n"
+            "• В группе: /folk, /litvin, /bred, /sosat, /cooldown\n\n"
+            "👤 Кнопка «Профиль» — Mini App с группами."
         )
         await update.message.reply_text(text, reply_markup=reply_markup)
     else:
-        text = (
-            "Я в группе! Доступные команды:\n"
-            "/folk — случайный стикер\n"
-            "/litvin — стикер из Litvin пака\n"
-            "/bred — стикер из Bred пака\n"
-            "/sosat — рандомный бред\n"
-            "/cooldown — настройка кулдаунов (владелец)"
-        )
+        text = "Я в группе! /folk, /litvin, /bred, /sosat, /cooldown"
         await update.message.reply_text(text)
 
 async def folk(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -409,7 +203,7 @@ async def folk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⏳ Подожди ещё {mins} мин. {secs} сек.", quote=True)
         return
     if not ALL_STICKERS:
-        await update.message.reply_text("Стикеры для /folk пока не настроены.")
+        await update.message.reply_text("Стикеры пока не загружены. Попробуй позже.")
         return
     sticker_id = random.choice(ALL_STICKERS)
     await update.message.reply_sticker(sticker=sticker_id)
@@ -424,7 +218,7 @@ async def litvin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⏳ Подожди ещё {mins} мин. {secs} сек.", quote=True)
         return
     if not litvin_stickers:
-        await update.message.reply_text("Стикеры для /litvin пока не настроены.")
+        await update.message.reply_text("Стикеры пока не загружены.")
         return
     sticker_id = random.choice(litvin_stickers)
     await update.message.reply_sticker(sticker=sticker_id)
@@ -439,7 +233,7 @@ async def bred(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⏳ Подожди ещё {mins} мин. {secs} сек.", quote=True)
         return
     if not bred_stickers:
-        await update.message.reply_text("Стикеры для /bred пока не настроены.")
+        await update.message.reply_text("Стикеры пока не загружены.")
         return
     sticker_id = random.choice(bred_stickers)
     await update.message.reply_sticker(sticker=sticker_id)
@@ -448,73 +242,61 @@ async def bred(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def sosat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     count = random.randint(3, 6)
     words = random.choices(RANDOM_WORDS, k=count)
-    phrase = " ".join(words)
-    await update.message.reply_text(phrase)
+    await update.message.reply_text(" ".join(words))
 
 # ---------- КУЛДАУНЫ ----------
 async def cooldown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
     if chat.type not in ("group", "supergroup"):
-        await update.message.reply_text("Эта команда только для групп.")
+        await update.message.reply_text("Только для групп.")
         return
     try:
         admins = await context.bot.get_chat_administrators(chat.id)
-    except Exception:
-        await update.message.reply_text("Не удалось проверить права. Бот должен быть администратором.")
+    except:
+        await update.message.reply_text("Бот должен быть админом.")
         return
     creator_id = None
     for admin in admins:
         if admin.status == ChatMemberStatus.OWNER:
             creator_id = admin.user.id
             break
-    if creator_id is None or user.id != creator_id:
-        await update.message.reply_text("Только создатель группы может менять кулдаун.")
+    if user.id != creator_id:
+        await update.message.reply_text("Только создатель группы.")
         return
+
     folk_cd = get_cd_duration(chat.id, 'folk')
     litvin_cd = get_cd_duration(chat.id, 'litvin')
     bred_cd = get_cd_duration(chat.id, 'bred')
-    text = (
-        f"⚙️ **Настройка кулдаунов**\n\n"
-        f"• /folk: **{folk_cd} с.**\n"
-        f"• /litvin: **{litvin_cd} с.**\n"
-        f"• /bred: **{bred_cd} с.**\n\n"
-        "Выбери команду для изменения:"
-    )
+    text = f"⚙️ Кулдауны:\n/folk: {folk_cd}с\n/litvin: {litvin_cd}с\n/bred: {bred_cd}с\n\nВыбери команду:"
     keyboard = [
-        [InlineKeyboardButton(f"🔄 Folk ({folk_cd}с)", callback_data="cooldown_select:folk")],
-        [InlineKeyboardButton(f"🔄 Litvin ({litvin_cd}с)", callback_data="cooldown_select:litvin")],
-        [InlineKeyboardButton(f"🔄 Bred ({bred_cd}с)", callback_data="cooldown_select:bred")],
+        [InlineKeyboardButton(f"Folk ({folk_cd}с)", callback_data="cd:folk")],
+        [InlineKeyboardButton(f"Litvin ({litvin_cd}с)", callback_data="cd:litvin")],
+        [InlineKeyboardButton(f"Bred ({bred_cd}с)", callback_data="cd:bred")],
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def cooldown_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cooldown_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = query.from_user
     chat_id = query.message.chat_id
     try:
         admins = await context.bot.get_chat_administrators(chat_id)
-    except Exception:
-        await query.answer("Не удалось проверить права.", show_alert=True)
+    except:
+        await query.answer("Бот должен быть админом.", show_alert=True)
         return
     creator_id = None
     for admin in admins:
         if admin.status == ChatMemberStatus.OWNER:
             creator_id = admin.user.id
             break
-    if creator_id is None or user.id != creator_id:
-        await query.answer("Только создатель группы может менять кулдаун.", show_alert=True)
+    if user.id != creator_id:
+        await query.answer("Только создатель.", show_alert=True)
         return
-    data = query.data
-    if not data.startswith("cooldown_select:"):
-        return
-    command = data.split(":")[1]
+    command = query.data.split(":")[1]
     pending_cooldown_input[(chat_id, user.id)] = command
     await query.answer()
-    await query.edit_message_text(
-        text=f"Введи кулдаун для /{command} в секундах (0–3600):\n0 = без задержки, 3600 = 1 час."
-    )
+    await query.edit_message_text(f"Введи кулдаун для /{command} в секундах (0-3600):")
 
 async def handle_cooldown_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -525,296 +307,36 @@ async def handle_cooldown_input(update: Update, context: ContextTypes.DEFAULT_TY
     command = pending_cooldown_input.pop(key)
     text = update.message.text.strip()
     if not text.isdigit():
-        await update.message.reply_text("Нужно ввести число. Операция отменена.")
+        await update.message.reply_text("Нужно число. Отмена.")
         return
     seconds = int(text)
     if not 0 <= seconds <= 3600:
-        await update.message.reply_text("Допустимый диапазон: 0 – 3600 секунд. Операция отменена.")
+        await update.message.reply_text("0-3600. Отмена.")
         return
     if chat_id not in chat_cooldowns:
         chat_cooldowns[chat_id] = {}
     chat_cooldowns[chat_id][command] = seconds
-    await update.message.reply_text(f"✅ Кулдаун для /{command} установлен: **{seconds} с.**", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ /{command}: {seconds}с")
 
-# ---------- ИНЛАЙН-РЕЖИМ ----------
+# ---------- ИНЛАЙН ----------
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not ALL_STICKERS:
         await update.inline_query.answer([], cache_time=0)
         return
     sticker_id = random.choice(ALL_STICKERS)
-    results = [
-        InlineQueryResultCachedSticker(
-            id=str(random.randint(100000, 999999)),
-            sticker_file_id=sticker_id
-        )
-    ]
+    results = [InlineQueryResultCachedSticker(id=str(random.randint(100000, 999999)), sticker_file_id=sticker_id)]
     await update.inline_query.answer(results, cache_time=0)
 
-# ---------- ГЛОБАЛЬНАЯ АДМИН-ПАНЕЛЬ ----------
-async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.username != ADMIN_USERNAME:
-        await update.message.reply_text("Недостаточно прав.")
-        return
-    if update.effective_chat.type != "private":
-        await update.message.reply_text("Админка только в ЛС.")
-        return
-
-    config = load_config()
-    folk_packs = config["commands"]["folk"]
-    litvin_packs = config["commands"]["litvin"]
-    bred_packs = config["commands"]["bred"]
-
-    text = (
-        "🔧 **Админ-панель управления стикерами**\n\n"
-        f"/folk: {len(folk_packs)} пак(ов), стикеров: {len(ALL_STICKERS)}\n"
-        f"/litvin: {len(litvin_packs)} пак(ов), стикеров: {len(litvin_stickers)}\n"
-        f"/bred: {len(bred_packs)} пак(ов), стикеров: {len(bred_stickers)}\n\n"
-        "Выберите действие:"
-    )
-
-    keyboard = [
-        [InlineKeyboardButton("➕ Добавить стикерпак", callback_data="admin_add_pack")],
-        [InlineKeyboardButton("📋 Показать конфигурацию", callback_data="admin_show_config")],
-        [InlineKeyboardButton("🗑 Удалить стикерпак", callback_data="admin_remove_pack")],
-        [InlineKeyboardButton("✏️ Изменить remove_last", callback_data="admin_edit_remove")],
-        [InlineKeyboardButton("🔄 Перезагрузить стикеры", callback_data="admin_refresh_stickers")],
-        [InlineKeyboardButton("🧹 Сбросить кулдауны", callback_data="admin_clear_cooldowns")],
-        [InlineKeyboardButton("📊 Статистика групп", callback_data="admin_stats")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
-
-# ---------- ОБРАБОТКА КНОПОК АДМИНКИ ----------
-async def admin_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-
-    if user.username != ADMIN_USERNAME:
-        await query.answer("Недостаточно прав.", show_alert=True)
-        return
-
-    data = query.data
-
-    if data == "admin_add_pack":
-        await query.edit_message_text(
-            "📝 **Добавление стикерпака**\n\n"
-            "Напишите в одном сообщении:\n"
-            "`<номер команды> <название пака> <сколько удалить с конца>`\n\n"
-            "Где номер команды:\n"
-            "`1` — /folk\n"
-            "`2` — /litvin\n"
-            "`3` — /bred\n\n"
-            "Пример:\n"
-            "`2 FolkPack 2`\n"
-            "(добавит пак FolkPack в /litvin и удалит 2 последних стикера)\n\n"
-            "`1 MyPack 0`\n"
-            "(добавит пак MyPack в /folk, ничего не удаляя)",
-            parse_mode="Markdown"
-        )
-
-    elif data == "admin_show_config":
-        config = load_config()
-        text = "📋 **Текущая конфигурация:**\n\n"
-        for cmd in ["folk", "litvin", "bred"]:
-            packs = config["commands"][cmd]
-            text += f"**/{cmd}**:\n"
-            if not packs:
-                text += "  — нет паков\n"
-            else:
-                for i, pack in enumerate(packs, 1):
-                    text += f"  {i}. `{pack['pack_name']}` (remove_last: {pack.get('remove_last', 0)})\n"
-            text += "\n"
-        await query.edit_message_text(text, parse_mode="Markdown")
-
-    elif data == "admin_remove_pack":
-        config = load_config()
-        keyboard = []
-        for cmd in ["folk", "litvin", "bred"]:
-            for idx, pack in enumerate(config["commands"][cmd]):
-                label = f"/{cmd}: {pack['pack_name']} (remove: {pack.get('remove_last',0)})"
-                callback = f"removepack:{cmd}:{idx}"
-                keyboard.append([InlineKeyboardButton(label, callback_data=callback)])
-        if not keyboard:
-            await query.edit_message_text("Нет добавленных стикерпаков.")
-            return
-        await query.edit_message_text("Выберите стикерпак для удаления:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-    elif data == "admin_edit_remove":
-        config = load_config()
-        keyboard = []
-        for cmd in ["folk", "litvin", "bred"]:
-            for idx, pack in enumerate(config["commands"][cmd]):
-                label = f"/{cmd}: {pack['pack_name']} (remove: {pack.get('remove_last',0)})"
-                callback = f"editremove:{cmd}:{idx}"
-                keyboard.append([InlineKeyboardButton(label, callback_data=callback)])
-        if not keyboard:
-            await query.edit_message_text("Нет добавленных стикерпаков.")
-            return
-        await query.edit_message_text("Выберите стикерпак для изменения remove_last:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-    elif data == "admin_refresh_stickers":
-        await query.answer("Перезагружаю стикеры...")
-        await load_stickers(context.application)
-        await query.edit_message_text(
-            f"✅ Стикеры перезагружены!\n\n"
-            f"Folk: {len(ALL_STICKERS)}\n"
-            f"Litvin: {len(litvin_stickers)}\n"
-            f"Bred: {len(bred_stickers)}"
-        )
-
-    elif data == "admin_clear_cooldowns":
-        count_folk = len(cooldowns_folk)
-        count_litvin = len(cooldowns_litvin)
-        count_bred = len(cooldowns_bred)
-        cooldowns_folk.clear()
-        cooldowns_litvin.clear()
-        cooldowns_bred.clear()
-        pending_cooldown_input.clear()
-        total = count_folk + count_litvin + count_bred
-        await query.answer(f"Сброшено кулдаунов: {total}")
-        await query.edit_message_text(
-            f"🧹 Кулдауны сброшены:\n"
-            f"/folk: {count_folk}\n"
-            f"/litvin: {count_litvin}\n"
-            f"/bred: {count_bred}"
-        )
-
-    elif data == "admin_stats":
-        total_groups = sum(len(groups) for groups in user_groups.values())
-        total_users = len(user_groups)
-        await query.edit_message_text(
-            f"📊 **Статистика**\n\n"
-            f"👥 Пользователей с группами: {total_users}\n"
-            f"💬 Всего групп: {total_groups}\n"
-            f"🎯 Стикеров Folk: {len(ALL_STICKERS)}\n"
-            f"🎯 Стикеров Litvin: {len(litvin_stickers)}\n"
-            f"🎯 Стикеров Bred: {len(bred_stickers)}",
-            parse_mode="Markdown"
-        )
-
-# ---------- ОБРАБОТКА УДАЛЕНИЯ/РЕДАКТИРОВАНИЯ ПАКОВ ----------
-async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    if user.username != ADMIN_USERNAME:
-        await query.answer("Недостаточно прав.", show_alert=True)
-        return
-
-    data = query.data
-
-    if data.startswith("removepack:"):
-        _, cmd, idx = data.split(":")
-        idx = int(idx)
-        config = load_config()
-        try:
-            removed = config["commands"][cmd].pop(idx)
-            save_config(config)
-            await load_stickers(context.application)
-            await query.edit_message_text(f"🗑 Пак `{removed['pack_name']}` удалён из /{cmd}. Стикеры перезагружены.", parse_mode="Markdown")
-        except Exception as e:
-            await query.answer(f"Ошибка: {e}", show_alert=True)
-
-    elif data.startswith("editremove:"):
-        _, cmd, idx = data.split(":")
-        idx = int(idx)
-        admin_state[user.id] = {"state": "waiting_remove_last", "command": cmd, "index": idx}
-        config = load_config()
-        pack = config["commands"][cmd][idx]
-        await query.edit_message_text(
-            f"Введите новое число удаляемых с конца стикеров для пака `{pack['pack_name']}` (0 или больше):",
-            parse_mode="Markdown"
-        )
-
-    await query.answer()
-
-# ---------- ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ ОТ АДМИНА ----------
-async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.username != ADMIN_USERNAME:
-        return
-
-    text = update.message.text.strip()
-
-    # Проверяем формат "номер имя_пака число" для добавления пака
-    if update.effective_chat.type == "private" and user.id not in admin_state:
-        parts = text.split()
-        if len(parts) == 3 and parts[0] in ("1", "2", "3") and parts[2].isdigit():
-            cmd_map = {"1": "folk", "2": "litvin", "3": "bred"}
-            cmd = cmd_map[parts[0]]
-            pack_name = parts[1]
-            remove_last = int(parts[2])
-            if remove_last < 0:
-                await update.message.reply_text("Число удаляемых стикеров не может быть отрицательным.")
-                return
-
-            config = load_config()
-            existing = [p for p in config["commands"][cmd] if p["pack_name"] == pack_name]
-            if existing:
-                await update.message.reply_text("Этот стикерпак уже привязан к данной команде.")
-                return
-
-            config["commands"][cmd].append({"pack_name": pack_name, "remove_last": remove_last})
-            save_config(config)
-            await load_stickers(context.application)
-            await update.message.reply_text(
-                f"✅ Пак `{pack_name}` добавлен к /{cmd} (удалено с конца: {remove_last}).\n"
-                f"Стикеров в команде теперь: {len(get_sticker_list_for_command(cmd))}",
-                parse_mode="Markdown"
-            )
-            return
-
-    # Если админ в состоянии ожидания
-    if user.id not in admin_state:
-        return
-
-    state = admin_state[user.id]
-
-    if state["state"] == "waiting_remove_last":
-        cmd = state["command"]
-        idx = state["index"]
-        try:
-            remove_last = int(text)
-            if remove_last < 0:
-                raise ValueError
-        except ValueError:
-            await update.message.reply_text("Введите целое неотрицательное число. Операция отменена.")
-            del admin_state[user.id]
-            return
-
-        config = load_config()
-        try:
-            pack = config["commands"][cmd][idx]
-            pack["remove_last"] = remove_last
-            save_config(config)
-            await load_stickers(context.application)
-            await update.message.reply_text(
-                f"✅ Для пака `{pack['pack_name']}` (/{cmd}) remove_last установлен на {remove_last}.\n"
-                f"Стикеры перезагружены.",
-                parse_mode="Markdown"
-            )
-        except IndexError:
-            await update.message.reply_text("Пак не найден. Операция отменена.")
-        del admin_state[user.id]
-
-# ---------- FLASK ДЛЯ MINI APP ----------
+# ---------- FLASK ----------
 flask_app = Flask(__name__)
 
 @flask_app.route('/getUserGroups')
 def get_user_groups():
     user_id = request.args.get('user_id')
     if not user_id:
-        return jsonify({"ok": False, "error": "no user_id"})
-    try:
-        uid = int(user_id)
-    except ValueError:
-        return jsonify({"ok": False, "error": "invalid user_id"})
-    groups = user_groups.get(uid, [])
+        return jsonify({"ok": False})
+    groups = user_groups.get(int(user_id), [])
     return jsonify({"ok": True, "result": groups})
-
-@flask_app.route('/health')
-def health():
-    return jsonify({"status": "ok", "groups_stored": sum(len(v) for v in user_groups.values())})
 
 def run_flask():
     flask_app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
@@ -822,11 +344,6 @@ def run_flask():
 # ---------- ЗАПУСК ----------
 def main():
     load_user_groups()
-    # Создаём конфиг с дефолтными паками, если его нет
-    if not os.path.exists(CONFIG_FILE):
-        default_config = load_config()  # эта функция уже возвращает дефолтный с паками
-        save_config(default_config)
-
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -835,27 +352,16 @@ def main():
     app.add_handler(CommandHandler("bred", bred))
     app.add_handler(CommandHandler("sosat", sosat))
     app.add_handler(CommandHandler("cooldown", cooldown_command))
-    app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(InlineQueryHandler(inline_query))
-
-    app.add_handler(CallbackQueryHandler(cooldown_button_handler, pattern="^cooldown_select:"))
-    app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern="^(removepack|editremove):"))
-    app.add_handler(CallbackQueryHandler(admin_button_handler, pattern="^admin_"))
-
+    app.add_handler(CallbackQueryHandler(cooldown_button, pattern="^cd:"))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_chat_members))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_cooldown_input), group=1)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_text), group=2)
-
-    app.job_queue.run_repeating(update_group_info, interval=1800, first=60)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_cooldown_input))
 
     import asyncio
     loop = asyncio.get_event_loop()
     loop.run_until_complete(load_stickers(app))
 
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    logging.info("Flask API запущен на порту 5000")
-
+    threading.Thread(target=run_flask, daemon=True).start()
     logging.info("Бот запущен...")
     app.run_polling()
 
