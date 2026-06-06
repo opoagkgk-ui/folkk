@@ -18,8 +18,8 @@ from telegram.ext import (
 )
 
 # ---------- НАСТРОЙКИ ----------
-TOKEN = "ТВОЙ_ТОКЕН_ОТ_BOTFATHER"
-MINI_APP_URL = "https://folk-valley-miniapp.onrender.com"
+TOKEN = "8891403100:AAGLU4dVDJWEsZFdmXGihyzbGUrGmUvDrcg"
+MINI_APP_URL = "https://jalal-p7p9.onrender.com"
 
 ADMIN_USERNAME = "xornid"
 
