@@ -713,11 +713,11 @@ def run_flask():
 # ---------- ЗАПУСК ----------
 def main():
     load_user_groups()
-    # При старте создаём/загружаем конфиг
     if not os.path.exists(CONFIG_FILE):
         default_config = {"commands": {"folk": [], "litvin": [], "tihon": []}}
         save_config(default_config)
 
+    # ВАЖНО: JobQueue требует установки python-telegram-bot[job-queue]
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -729,16 +729,16 @@ def main():
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(InlineQueryHandler(inline_query))
 
-    # Обработчики callback'ов
+    # Порядок важен: сначала более специфичные паттерны
     app.add_handler(CallbackQueryHandler(cooldown_button_handler, pattern="^cooldown_select:"))
-    app.add_handler(CallbackQueryHandler(admin_button_handler, pattern="^admin_"))
     app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern="^(addpack_cmd|removepack|editremove):"))
+    app.add_handler(CallbackQueryHandler(admin_button_handler, pattern="^admin_"))
 
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_chat_members))
-    # Текстовые сообщения (ввод кулдауна, ввод для админа)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_cooldown_input), group=1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_text), group=2)
 
+    # Периодическое обновление групп (раз в 30 минут)
     app.job_queue.run_repeating(update_group_info, interval=1800, first=60)
 
     import asyncio
