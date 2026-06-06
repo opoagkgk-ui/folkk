@@ -115,7 +115,6 @@ def save_config(config):
         logging.error(f"Ошибка сохранения конфига: {e}")
 
 async def load_stickers(app: Application):
-async def load_stickers(app: Application):
     global ALL_STICKERS, litvin_stickers, bred_stickers
     config = load_config()
     commands_config = config.get("commands", {})
