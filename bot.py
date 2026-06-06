@@ -74,7 +74,7 @@ def save_user_groups():
     except Exception as e:
         logging.error(f"Не удалось сохранить user_groups.json: {e}")
 
-# ---------- КОНФИГУРАЦИЯ СТИКЕРОВ (с дефолтными паками) ----------
+# ---------- КОНФИГУРАЦИЯ СТИКЕРОВ ----------
 def load_config():
     default_config = {
         "commands": {
@@ -99,7 +99,6 @@ def load_config():
     try:
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
             loaded = json.load(f)
-            # Проверяем наличие ключа bred (для обратной совместимости)
             if "tihon" in loaded.get("commands", {}):
                 loaded["commands"]["bred"] = loaded["commands"].pop("tihon")
             return loaded
@@ -107,12 +106,14 @@ def load_config():
         logging.error(f"Ошибка загрузки конфига: {e}")
         return default_config
 
+
 def save_config(config):
     try:
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(config, f, ensure_ascii=False, indent=2)
     except Exception as e:
         logging.error(f"Ошибка сохранения конфига: {e}")
+
 
 async def load_stickers(app: Application):
     global ALL_STICKERS, litvin_stickers, bred_stickers
