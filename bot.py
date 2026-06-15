@@ -394,7 +394,7 @@ def get_impact_font(size):
     """Ищет Impact.ttf в папке с ботом, иначе использует DejaVu Bold."""
     paths = [
         "Impact.ttf",
-        "/app/Impact.ttf",
+        "/app/shared/Impact.ttf",
         "./Impact.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
