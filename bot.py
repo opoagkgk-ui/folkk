@@ -1,4 +1,7 @@
 import logging
+import requests
+import urllib.parse
+import asyncio
 import random
 import json
 import os
@@ -508,17 +511,17 @@ async def sosat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== /zabava ====================
 async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
-    if not message.photo and not (message.reply_to_message and message.reply_to_message.photo):
-        await message.reply_text("📸 Отправь фото с подписью /zabava текст или ответь командой на фото.")
-        return
-
-    # Получаем текст
+    # Получаем текст команды
     text = " ".join(context.args) if context.args else ""
     if not text:
-        await message.reply_text("❌ Напиши текст: /zabava Верхний текст и Нижний текст")
+        await message.reply_text(
+            "❌ Напиши текст: /zabava Верхний текст и Нижний текст\n"
+            "Пример: /zabava Привет и Мир\n"
+            "Разделители: ' и ', ' | ', '|'"
+        )
         return
 
-    # Разделяем на верх/низ (разделители: " и ", " | ", "|")
+    # Разделяем на верх/низ
     top_text = ""
     bottom_text = ""
     for sep in [" и ", " | ", "|"]:
@@ -530,20 +533,30 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not top_text:
         top_text = text.strip()
 
-    # Загружаем фото
-    if message.photo:
-        file_id = message.photo[-1].file_id
-    else:
-        file_id = message.reply_to_message.photo[-1].file_id
+    # Кодируем текст для URL
+    top_enc = urllib.parse.quote(top_text if top_text else "_")
+    bottom_enc = urllib.parse.quote(bottom_text if bottom_text else "_")
 
+    # Выбираем шаблон (можно заменить на 'doge', 'drake', 'two_buttons' и т.д.)
+    template = "fry"   # или 'doge', 'fry', 'angeleyes'
+
+    # Формируем URL memegen с шрифтом impact по умолчанию
+    url = f"https://api.memegen.link/images/{template}/{top_enc}/{bottom_enc}.png?font=impact"
+
+    # Асинхронно скачиваем картинку через requests в отдельном потоке
+    loop = asyncio.get_event_loop()
     try:
-        file = await context.bot.get_file(file_id)
-        img_bytes = io.BytesIO()
-        await file.download_to_memory(img_bytes)
-        img_bytes.seek(0)
-        image = Image.open(img_bytes).convert("RGB")
+        response = await loop.run_in_executor(None, requests.get, url)
+        if response.status_code != 200:
+            await message.reply_text(f"❌ Ошибка API: {response.status_code}")
+            return
+        photo_bytes = response.content
+        await message.reply_photo(
+            photo=photo_bytes,
+            caption=f"🎭 Мем сгенерирован через memegen.link\nШаблон: {template}"
+        )
     except Exception as e:
-        await message.reply_text(f"❌ Ошибка загрузки фото: {e}")
+        await message.reply_text(f"❌ Ошибка при создании мема: {e}")
         return
 
     # Обработка изображения
