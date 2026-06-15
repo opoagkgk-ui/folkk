@@ -2,8 +2,10 @@ import logging
 import random
 import json
 import os
+import io
 import threading
 from datetime import datetime, timedelta
+from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, request, jsonify
 from telegram import Update, InlineQueryResultCachedSticker, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.constants import ChatMemberStatus
@@ -28,7 +30,8 @@ RANDOM_WORDS = [
     "огурец", "микрофон", "самокат", "трамвай", "облако", "одуван"
 ]
 
-# Стикеры для /folk: ByFolkValley (120) + AtlasScottishFold (120) + Vooocaaa_by_fStikBot (32) = 272
+# ==================== СТИКЕРЫ ====================
+# /folk: ByFolkValley (120) + AtlasScottishFold (120) + Vooocaaa_by_fStikBot (32) = 272
 ALL_STICKERS = [
     "CAACAgIAAxUAAWokXU38_MuMDT7hhvRuZctYuCKJAALIoAACX-ToSLg5DDhF1X44OwQ",
     "CAACAgIAAxUAAWokXU3n6LDpd626aZfX7VT1CippAAKapAAC1p_wSAAByejMhUYpHjsE",
@@ -386,6 +389,22 @@ user_groups = {}
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 
+# ==================== ШРИФТ ДЛЯ /zabava ====================
+def get_impact_font(size):
+    """Ищет Impact.ttf в папке с ботом, иначе использует DejaVu Bold."""
+    paths = [
+        "Impact.ttf",
+        "/app/Impact.ttf",
+        "./Impact.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ]
+    for path in paths:
+        if os.path.exists(path):
+            return ImageFont.truetype(path, size)
+    return ImageFont.load_default().font_variant(size=size)
+
+# ==================== ФУНКЦИИ КУЛДАУНОВ ====================
 def load_user_groups():
     global user_groups
     if os.path.exists(USER_GROUPS_FILE):
@@ -427,6 +446,7 @@ def check_cd(chat_id, user_id, command):
 def use_cd(chat_id, user_id, command):
     get_cd_dict(command)[(chat_id, user_id)] = datetime.now()
 
+# ==================== КОМАНДЫ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
         keyboard = [[InlineKeyboardButton("👤 Профиль", web_app=WebAppInfo(url=MINI_APP_URL))]]
@@ -435,11 +455,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• @folkvalleybot в любом чате — случайный стикер\n"
             "• /folk, /litvin, /bred — стикеры\n"
             "• /sosat — бессвязный бред\n"
+            "• /zabava — мем из фото + текст\n"
             "• /cooldown — кулдауны (владелец группы)",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     else:
-        await update.message.reply_text("Я в группе! /folk /litvin /bred /sosat /cooldown")
+        await update.message.reply_text("Я в группе! /folk /litvin /bred /sosat /zabava /cooldown")
 
 async def folk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id, user_id = update.effective_chat.id, update.effective_user.id
@@ -484,6 +505,115 @@ async def sosat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     words = random.choices(RANDOM_WORDS, k=random.randint(3, 6))
     await update.message.reply_text(" ".join(words))
 
+# ==================== /zabava ====================
+async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message.photo and not (message.reply_to_message and message.reply_to_message.photo):
+        await message.reply_text("📸 Отправь фото с подписью /zabava текст или ответь командой на фото.")
+        return
+
+    # Получаем текст
+    text = " ".join(context.args) if context.args else ""
+    if not text:
+        await message.reply_text("❌ Напиши текст: /zabava Верхний текст и Нижний текст")
+        return
+
+    # Разделяем на верх/низ (разделители: " и ", " | ", "|")
+    top_text = ""
+    bottom_text = ""
+    for sep in [" и ", " | ", "|"]:
+        if sep in text:
+            parts = text.split(sep, 1)
+            top_text = parts[0].strip()
+            bottom_text = parts[1].strip() if len(parts) > 1 else ""
+            break
+    if not top_text:
+        top_text = text.strip()
+
+    # Загружаем фото
+    if message.photo:
+        file_id = message.photo[-1].file_id
+    else:
+        file_id = message.reply_to_message.photo[-1].file_id
+
+    try:
+        file = await context.bot.get_file(file_id)
+        img_bytes = io.BytesIO()
+        await file.download_to_memory(img_bytes)
+        img_bytes.seek(0)
+        image = Image.open(img_bytes).convert("RGB")
+    except Exception as e:
+        await message.reply_text(f"❌ Ошибка загрузки фото: {e}")
+        return
+
+    # Обработка изображения
+    max_size = 800
+    if max(image.width, image.height) > max_size:
+        ratio = max_size / max(image.width, image.height)
+        new_size = (int(image.width * ratio), int(image.height * ratio))
+        image = image.resize(new_size, Image.Resampling.LANCZOS)
+
+    draw = ImageDraw.Draw(image)
+    width, height = image.size
+    font_size = int(height / 10)
+    font = get_impact_font(font_size)
+
+    def draw_text_with_outline(img_draw, text, y_offset, is_top=True):
+        if not text:
+            return
+        max_width = width - 40
+        lines = []
+        words = text.split()
+        current_line = ""
+        for word in words:
+            test_line = f"{current_line} {word}".strip()
+            bbox = img_draw.textbbox((0, 0), test_line, font=font)
+            if bbox[2] - bbox[0] <= max_width:
+                current_line = test_line
+            else:
+                if current_line:
+                    lines.append(current_line)
+                current_line = word
+        if current_line:
+            lines.append(current_line)
+
+        y = y_offset
+        for line in lines:
+            bbox = img_draw.textbbox((0, 0), line, font=font)
+            line_width = bbox[2] - bbox[0]
+            x = (width - line_width) // 2
+            for dx, dy in [(-2, -2), (-2, 2), (2, -2), (2, 2)]:
+                img_draw.text((x + dx, y + dy), line, font=font, fill="black")
+            img_draw.text((x, y), line, font=font, fill="white")
+            y += bbox[3] - bbox[1] + 5
+
+    draw_text_with_outline(draw, top_text, y_offset=10, is_top=True)
+    if bottom_text:
+        # Считаем высоту нижнего текста
+        lines = []
+        words = bottom_text.split()
+        current_line = ""
+        for word in words:
+            test_line = f"{current_line} {word}".strip()
+            bbox = draw.textbbox((0, 0), test_line, font=font)
+            if bbox[2] - bbox[0] <= width - 40:
+                current_line = test_line
+            else:
+                if current_line:
+                    lines.append(current_line)
+                current_line = word
+        if current_line:
+            lines.append(current_line)
+        total_height = sum(draw.textbbox((0, 0), line, font=font)[3] - draw.textbbox((0, 0), line, font=font)[1] + 5 for line in lines) - 5
+        y_start = height - 10 - total_height
+        draw_text_with_outline(draw, bottom_text, y_offset=y_start, is_top=False)
+
+    output = io.BytesIO()
+    image.save(output, format="JPEG", quality=95)
+    output.seek(0)
+    await message.reply_photo(photo=output, caption="🎭 Твой мем готов!")
+
+# ==================== КУЛДАУНЫ (команды владельца) ====================
 async def cooldown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat, user = update.effective_chat, update.effective_user
     if chat.type not in ("group", "supergroup"):
@@ -534,6 +664,7 @@ async def cd_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_cooldowns[update.effective_chat.id][cmd] = sec
     await update.message.reply_text(f"✅ /{cmd}: {sec}с")
 
+# ==================== ИНЛАЙН ====================
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not ALL_STICKERS:
         await update.inline_query.answer([], cache_time=0)
@@ -543,6 +674,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         InlineQueryResultCachedSticker(id=str(random.randint(100000, 999999)), sticker_file_id=sid)
     ], cache_time=0)
 
+# ==================== FLASK ДЛЯ MINI APP ====================
 flask_app = Flask(__name__)
 
 @flask_app.route('/getUserGroups')
@@ -555,6 +687,7 @@ def get_user_groups():
 def run_flask():
     flask_app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
 
+# ==================== ЗАПУСК ====================
 def main():
     load_user_groups()
     app = Application.builder().token(TOKEN).build()
@@ -564,6 +697,7 @@ def main():
     app.add_handler(CommandHandler("litvin", litvin))
     app.add_handler(CommandHandler("bred", bred))
     app.add_handler(CommandHandler("sosat", sosat))
+    app.add_handler(CommandHandler("zabava", zabava))
     app.add_handler(CommandHandler("cooldown", cooldown_cmd))
     app.add_handler(InlineQueryHandler(inline_query))
     app.add_handler(CallbackQueryHandler(cd_button, pattern="^cd:"))
@@ -574,4 +708,4 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":
-    main() 
+    main()
