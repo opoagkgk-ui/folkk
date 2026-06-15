@@ -393,7 +393,7 @@ logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=lo
 def get_impact_font(size):
     """Ищет Impact.ttf в папке с ботом, иначе использует DejaVu Bold."""
     paths = [
-        "Impact.ttf",
+        "/app/shared/tmpssd4ojof.ttf",
         "/app/shared/Impact.ttf",
         "./Impact.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
