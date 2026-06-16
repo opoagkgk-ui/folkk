@@ -392,20 +392,19 @@ user_groups = {}
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 
 # ==================== ФУНКЦИЯ ЗАГРУЗКИ НА TELEGRAPH ====================
-def upload_to_catbox(image_bytes):
-    """Загружает байты изображения на Catbox.moe через простой POST-запрос."""
-    url = "https://catbox.moe/user/api.php"
-    files = {"fileToUpload": ("image.jpg", image_bytes, "image/jpeg")}
-    data = {"reqtype": "fileupload"}
+def upload_to_0x0(image_bytes):
+    """Загружает байты изображения на 0x0.st и возвращает прямую ссылку."""
+    url = "https://0x0.st"
+    files = {"file": ("image.jpg", image_bytes, "image/jpeg")}
     try:
-        resp = requests.post(url, files=files, data=data, timeout=20)
+        resp = requests.post(url, files=files, timeout=20)
         resp.raise_for_status()
         file_url = resp.text.strip()
         if file_url.startswith("http"):
             return file_url
         return None
     except Exception as e:
-        print(f"Ошибка загрузки на Catbox: {e}")
+        print(f"Ошибка загрузки на 0x0.st: {e}")
         return None
 
 # ==================== ФУНКЦИИ КУЛДАУНОВ ====================
