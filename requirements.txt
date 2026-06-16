@@ -3,3 +3,4 @@ flask==3.0.0
 requests>=2.31.0
 aiohttp>=3.9.0
 googletrans==4.0.0-rc1
+httpx==0.25.2
