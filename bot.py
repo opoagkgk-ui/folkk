@@ -8,6 +8,7 @@ import os
 import io
 import threading
 from datetime import datetime, timedelta
+from catbox_uploader import CatboxUploader
 from flask import Flask, request, jsonify
 from telegram import Update, InlineQueryResultCachedSticker, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.constants import ChatMemberStatus
@@ -392,19 +393,19 @@ user_groups = {}
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 
 # ==================== ФУНКЦИЯ ЗАГРУЗКИ НА TELEGRAPH ====================
-def upload_to_telegraph(image_bytes):
-    """Загружает байты изображения на telegra.ph и возвращает прямую ссылку."""
-    url = "https://telegra.ph/upload"
-    files = {"file": ("image.jpg", image_bytes, "image/jpeg")}
+def upload_to_catbox(image_bytes):
+    """Загружает байты изображения на Catbox.moe и возвращает прямую ссылку."""
     try:
-        resp = requests.post(url, files=files, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        if data and isinstance(data, list) and "src" in data[0]:
-            return "https://telegra.ph" + data[0]["src"]
-        else:
-            return None
-    except Exception:
+        with open("temp_image.jpg", "wb") as f:
+            f.write(image_bytes)
+        
+        uploader = CatboxUploader()
+        file_url = uploader.upload_file('temp_image.jpg')  # без лишних индексов
+        
+        os.remove("temp_image.jpg")
+        return file_url
+    except Exception as e:
+        print(f"Ошибка загрузки на Catbox: {e}")
         return None
 
 # ==================== ФУНКЦИИ КУЛДАУНОВ ====================
@@ -559,7 +560,7 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 5. Загружаем на telegra.ph (в отдельном потоке)
     loop = asyncio.get_event_loop()
     try:
-        photo_url = await loop.run_in_executor(None, upload_to_telegraph, image_data)
+        photo_url = await loop.run_in_executor(None, upload_to_catbox, image_data)
         if not photo_url:
             await message.reply_text("❌ Не удалось загрузить фото на хостинг.")
             return
