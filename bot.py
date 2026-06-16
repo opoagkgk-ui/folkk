@@ -7,6 +7,7 @@ import json
 import os
 import io
 import threading
+import base64
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from telegram import Update, InlineQueryResultCachedSticker, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
@@ -23,6 +24,9 @@ from telegram.ext import (
 
 TOKEN = "8891403100:AAGLU4dVDJWEsZFdmXGihyzbGUrGmUvDrcg"
 MINI_APP_URL = "https://jalal-p7p9.onrender.com"
+
+# ========== API-ключ ImgBB (замените на свой) ==========
+IMGBB_API_KEY = "2bbaa8526b22fc8d7930403e13dbbdcd"
 
 RANDOM_WORDS = [
     "кот", "привет", "чайник", "Владимир", "мандарин", "космос", "велосипед",
@@ -391,20 +395,28 @@ user_groups = {}
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 
-# ==================== ФУНКЦИЯ ЗАГРУЗКИ НА TELEGRAPH ====================
-def upload_to_0x0(image_bytes):
-    """Загружает байты изображения на 0x0.st и возвращает прямую ссылку."""
-    url = "https://0x0.st"
-    files = {"file": ("image.jpg", image_bytes, "image/jpeg")}
+# ==================== ЗАГРУЗКА НА IMGBB ====================
+def upload_to_imgbb(image_bytes):
+    """Загружает байты изображения на ImgBB и возвращает прямую ссылку."""
+    url = "https://api.imgbb.com/1/upload"
+    encoded_image = base64.b64encode(image_bytes).decode('utf-8')
+    payload = {
+        "key": IMGBB_API_KEY,
+        "image": encoded_image,
+        "name": "meme.jpg",
+        "expiration": 86400  # удалится через сутки, можно убрать
+    }
     try:
-        resp = requests.post(url, files=files, timeout=20)
+        resp = requests.post(url, data=payload, timeout=30)
         resp.raise_for_status()
-        file_url = resp.text.strip()
-        if file_url.startswith("http"):
-            return file_url
-        return None
+        data = resp.json()
+        if data.get("success"):
+            return data["data"]["url"]
+        else:
+            print(f"Ошибка ImgBB: {data}")
+            return None
     except Exception as e:
-        print(f"Ошибка загрузки на 0x0.st: {e}")
+        print(f"Исключение при загрузке на ImgBB: {e}")
         return None
 
 # ==================== ФУНКЦИИ КУЛДАУНОВ ====================
@@ -425,7 +437,7 @@ def save_user_groups():
         pass
 
 def get_cd(chat_id, command):
-    # Кулдаун по умолчанию — 60 секунд (вместо 300)
+    # Кулдаун по умолчанию — 60 секунд
     if chat_id not in chat_cooldowns:
         chat_cooldowns[chat_id] = {'folk': 60, 'litvin': 60, 'bred': 60}
     return chat_cooldowns[chat_id].get(command, 60)
@@ -509,16 +521,16 @@ async def sosat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     words = random.choices(RANDOM_WORDS, k=random.randint(3, 6))
     await update.message.reply_text(" ".join(words))
 
-# ==================== /zabava (с memegen.link и вашим фото) ====================
+# ==================== /zabava (с memegen.link и ImgBB) ====================
 async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
 
-    # 1. Проверяем, есть ли фото
+    # Проверяем наличие фото
     if not message.photo and not (message.reply_to_message and message.reply_to_message.photo):
         await message.reply_text("📸 Отправь фото с подписью /zabava текст или ответь командой на фото.")
         return
 
-    # 2. Получаем текст команды
+    # Получаем текст команды
     text = " ".join(context.args) if context.args else ""
     if not text:
         await message.reply_text(
@@ -528,7 +540,7 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # 3. Разделяем на верхний и нижний текст
+    # Разделяем на верхний и нижний текст
     top_text = ""
     bottom_text = ""
     for sep in [" и ", " | ", "|"]:
@@ -540,7 +552,7 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not top_text:
         top_text = text.strip()
 
-    # 4. Скачиваем фото
+    # Скачиваем фото
     if message.photo:
         file_id = message.photo[-1].file_id
     else:
@@ -556,25 +568,25 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(f"❌ Ошибка загрузки фото: {e}")
         return
 
-    # 5. Загружаем на telegra.ph (в отдельном потоке)
+    # Загружаем на ImgBB (в отдельном потоке)
     loop = asyncio.get_event_loop()
     try:
-        photo_url = await loop.run_in_executor(None, upload_to_0x0, image_data)
+        photo_url = await loop.run_in_executor(None, upload_to_imgbb, image_data)
         if not photo_url:
-            await message.reply_text("❌ Не удалось загрузить фото на хостинг.")
+            await message.reply_text("❌ Не удалось загрузить фото на хостинг (ImgBB).")
             return
     except Exception as e:
         await message.reply_text(f"❌ Ошибка загрузки на хостинг: {e}")
         return
 
-    # 6. Формируем URL для memegen.link
+    # Формируем URL для memegen.link
     top_enc = urllib.parse.quote(top_text if top_text else "_")
     bottom_enc = urllib.parse.quote(bottom_text if bottom_text else "_")
     bg_enc = urllib.parse.quote(photo_url)
 
     url = f"https://api.memegen.link/images/custom/{top_enc}/{bottom_enc}.png?background={bg_enc}&font=impact"
 
-    # 7. Скачиваем готовый мем
+    # Скачиваем готовый мем
     try:
         response = await loop.run_in_executor(None, requests.get, url)
         if response.status_code != 200:
