@@ -559,7 +559,7 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 5. Загружаем на telegra.ph (в отдельном потоке)
     loop = asyncio.get_event_loop()
     try:
-        photo_url = await loop.run_in_executor(None, upload_to_catbox, image_data)
+        photo_url = await loop.run_in_executor(None, upload_to_0x0, image_data)
         if not photo_url:
             await message.reply_text("❌ Не удалось загрузить фото на хостинг.")
             return
