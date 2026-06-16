@@ -23,9 +23,8 @@ from telegram.ext import (
     filters,
 )
 
-# ==================== ПЕРЕВОДЧИК ====================
-from googletrans import Translator
-translator = Translator()
+# ==================== ПЕРЕВОДЧИК (deep_translator) ====================
+from deep_translator import GoogleTranslator
 
 # ==================== ТОКЕНЫ И КЛЮЧИ ====================
 TOKEN = "8891403100:AAGLU4dVDJWEsZFdmXGihyzbGUrGmUvDrcg"
@@ -46,7 +45,7 @@ RANDOM_WORDS = [
     "огурец", "микрофон", "самокат", "трамвай", "облако", "одуван"
 ]
 
-# ==================== СТИКЕРЫ ====================
+# ==================== СТИКЕРЫ (полный список) ====================
 ALL_STICKERS = [
     "CAACAgIAAxUAAWokXU38_MuMDT7hhvRuZctYuCKJAALIoAACX-ToSLg5DDhF1X44OwQ",
     "CAACAgIAAxUAAWokXU3n6LDpd626aZfX7VT1CippAAKapAAC1p_wSAAByejMhUYpHjsE",
@@ -430,13 +429,13 @@ def upload_to_imgbb(image_bytes):
 
 # ==================== ФУНКЦИЯ ПЕРЕВОДА ====================
 def translate_text(text, target_lang='en'):
-    """Переводит текст на английский язык. В случае ошибки возвращает оригинал."""
+    """Переводит текст на английский через GoogleTranslator (без ключа)."""
     try:
-        translation = translator.translate(text, dest=target_lang)
-        return translation.text
+        translated = GoogleTranslator(source='auto', target=target_lang).translate(text)
+        return translated
     except Exception as e:
         logging.error(f"Ошибка перевода: {e}")
-        return text
+        return text  # возвращаем оригинал при ошибке
 
 # ==================== ФУНКЦИИ КУЛДАУНОВ ====================
 def load_user_groups():
