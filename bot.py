@@ -8,7 +8,6 @@ import os
 import io
 import threading
 from datetime import datetime, timedelta
-from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, request, jsonify
 from telegram import Update, InlineQueryResultCachedSticker, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.constants import ChatMemberStatus
@@ -165,7 +164,7 @@ ALL_STICKERS = [
     "CAACAgIAAxUAAWokXXvCQ9Y9lt3FfjML_GAzrPGoAAIUmQACiYeYSBDq029KggqPOwQ",
     "CAACAgIAAxUAAWokXXuzQ_QbgIIaOjU7v3-KGd2KAAJGpQAC9CuZSPra3CV_Kt_pOwQ",
     "CAACAgIAAxUAAWokXXsBevataZ7Iu9CoL5GhVqVNAAKCnAAClduZSMtCQjVW1jB-OwQ",
-    "CAACAgIAAxUAAWokXXu77ihFncTCzk5qlxCvRJfXAAJamwACYJugSLNszm8sIAlyOwQ",
+    "CAACAgIAAxUAAWokXXu77ihFncTCzk5qlxCvRJfXAAJamwACYMJugSLNszm8sIAlyOwQ",
     "CAACAgIAAxUAAWokXXvEPe0PC5paq9GxtKta86ThAAIGngACvt-ZSCUh-hVPfumAOwQ",
     "CAACAgIAAxUAAWokXXsbBnomGgZU89vWn1Y7-WFaAAIvmAACgaSYSLT9UDj3WyvXOwQ",
     "CAACAgIAAxUAAWokXXuezDPeAnlprcfj4xTQ2hQVAAKVmAAC8XqYSDvb5g0ayWX8OwQ",
@@ -392,20 +391,21 @@ user_groups = {}
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 
-# ==================== ШРИФТ ДЛЯ /zabava ====================
-def get_impact_font(size):
-    """Ищет Impact.ttf в папке с ботом, иначе использует DejaVu Bold."""
-    paths = [
-        "/app/shared/tmpssd4ojof.ttf",
-        "/app/shared/Impact.ttf",
-        "./Impact.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-    ]
-    for path in paths:
-        if os.path.exists(path):
-            return ImageFont.truetype(path, size)
-    return ImageFont.load_default().font_variant(size=size)
+# ==================== ФУНКЦИЯ ЗАГРУЗКИ НА TELEGRAPH ====================
+def upload_to_telegraph(image_bytes):
+    """Загружает байты изображения на telegra.ph и возвращает прямую ссылку."""
+    url = "https://telegra.ph/upload"
+    files = {"file": ("image.jpg", image_bytes, "image/jpeg")}
+    try:
+        resp = requests.post(url, files=files, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        if data and isinstance(data, list) and "src" in data[0]:
+            return "https://telegra.ph" + data[0]["src"]
+        else:
+            return None
+    except Exception:
+        return None
 
 # ==================== ФУНКЦИИ КУЛДАУНОВ ====================
 def load_user_groups():
@@ -425,9 +425,10 @@ def save_user_groups():
         pass
 
 def get_cd(chat_id, command):
+    # Кулдаун по умолчанию — 60 секунд (вместо 300)
     if chat_id not in chat_cooldowns:
-        chat_cooldowns[chat_id] = {'folk': 300, 'litvin': 300, 'bred': 300}
-    return chat_cooldowns[chat_id].get(command, 300)
+        chat_cooldowns[chat_id] = {'folk': 60, 'litvin': 60, 'bred': 60}
+    return chat_cooldowns[chat_id].get(command, 60)
 
 def get_cd_dict(command):
     if command == 'folk': return cooldowns_folk
@@ -508,10 +509,16 @@ async def sosat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     words = random.choices(RANDOM_WORDS, k=random.randint(3, 6))
     await update.message.reply_text(" ".join(words))
 
-# ==================== /zabava ====================
+# ==================== /zabava (с memegen.link и вашим фото) ====================
 async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
-    # Получаем текст команды
+
+    # 1. Проверяем, есть ли фото
+    if not message.photo and not (message.reply_to_message and message.reply_to_message.photo):
+        await message.reply_text("📸 Отправь фото с подписью /zabava текст или ответь командой на фото.")
+        return
+
+    # 2. Получаем текст команды
     text = " ".join(context.args) if context.args else ""
     if not text:
         await message.reply_text(
@@ -521,7 +528,7 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Разделяем на верх/низ
+    # 3. Разделяем на верхний и нижний текст
     top_text = ""
     bottom_text = ""
     for sep in [" и ", " | ", "|"]:
@@ -533,98 +540,50 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not top_text:
         top_text = text.strip()
 
-    # Кодируем текст для URL
+    # 4. Скачиваем фото
+    if message.photo:
+        file_id = message.photo[-1].file_id
+    else:
+        file_id = message.reply_to_message.photo[-1].file_id
+
+    try:
+        file = await context.bot.get_file(file_id)
+        img_bytes = io.BytesIO()
+        await file.download_to_memory(img_bytes)
+        img_bytes.seek(0)
+        image_data = img_bytes.read()
+    except Exception as e:
+        await message.reply_text(f"❌ Ошибка загрузки фото: {e}")
+        return
+
+    # 5. Загружаем на telegra.ph (в отдельном потоке)
+    loop = asyncio.get_event_loop()
+    try:
+        photo_url = await loop.run_in_executor(None, upload_to_telegraph, image_data)
+        if not photo_url:
+            await message.reply_text("❌ Не удалось загрузить фото на хостинг.")
+            return
+    except Exception as e:
+        await message.reply_text(f"❌ Ошибка загрузки на хостинг: {e}")
+        return
+
+    # 6. Формируем URL для memegen.link
     top_enc = urllib.parse.quote(top_text if top_text else "_")
     bottom_enc = urllib.parse.quote(bottom_text if bottom_text else "_")
+    bg_enc = urllib.parse.quote(photo_url)
 
-    # Выбираем шаблон (можно заменить на 'doge', 'drake', 'two_buttons' и т.д.)
-    template = "fry"   # или 'doge', 'fry', 'angeleyes'
+    url = f"https://api.memegen.link/images/custom/{top_enc}/{bottom_enc}.png?background={bg_enc}&font=impact"
 
-    # Формируем URL memegen с шрифтом impact по умолчанию
-    url = f"https://api.memegen.link/images/{template}/{top_enc}/{bottom_enc}.png?font=impact"
-
-    # Асинхронно скачиваем картинку через requests в отдельном потоке
-    loop = asyncio.get_event_loop()
+    # 7. Скачиваем готовый мем
     try:
         response = await loop.run_in_executor(None, requests.get, url)
         if response.status_code != 200:
-            await message.reply_text(f"❌ Ошибка API: {response.status_code}")
+            await message.reply_text(f"❌ Ошибка генерации мема: {response.status_code}")
             return
-        photo_bytes = response.content
-        await message.reply_photo(
-            photo=photo_bytes,
-            caption=f"🎭 Мем сгенерирован через memegen.link\nШаблон: {template}"
-        )
+        meme_bytes = response.content
+        await message.reply_photo(photo=meme_bytes, caption="🎭 Твой мем готов!")
     except Exception as e:
         await message.reply_text(f"❌ Ошибка при создании мема: {e}")
-        return
-
-    # Обработка изображения
-    max_size = 800
-    if max(image.width, image.height) > max_size:
-        ratio = max_size / max(image.width, image.height)
-        new_size = (int(image.width * ratio), int(image.height * ratio))
-        image = image.resize(new_size, Image.Resampling.LANCZOS)
-
-    draw = ImageDraw.Draw(image)
-    width, height = image.size
-    font_size = int(height / 10)
-    font = get_impact_font(font_size)
-
-    def draw_text_with_outline(img_draw, text, y_offset, is_top=True):
-        if not text:
-            return
-        max_width = width - 40
-        lines = []
-        words = text.split()
-        current_line = ""
-        for word in words:
-            test_line = f"{current_line} {word}".strip()
-            bbox = img_draw.textbbox((0, 0), test_line, font=font)
-            if bbox[2] - bbox[0] <= max_width:
-                current_line = test_line
-            else:
-                if current_line:
-                    lines.append(current_line)
-                current_line = word
-        if current_line:
-            lines.append(current_line)
-
-        y = y_offset
-        for line in lines:
-            bbox = img_draw.textbbox((0, 0), line, font=font)
-            line_width = bbox[2] - bbox[0]
-            x = (width - line_width) // 2
-            for dx, dy in [(-2, -2), (-2, 2), (2, -2), (2, 2)]:
-                img_draw.text((x + dx, y + dy), line, font=font, fill="black")
-            img_draw.text((x, y), line, font=font, fill="white")
-            y += bbox[3] - bbox[1] + 5
-
-    draw_text_with_outline(draw, top_text, y_offset=10, is_top=True)
-    if bottom_text:
-        # Считаем высоту нижнего текста
-        lines = []
-        words = bottom_text.split()
-        current_line = ""
-        for word in words:
-            test_line = f"{current_line} {word}".strip()
-            bbox = draw.textbbox((0, 0), test_line, font=font)
-            if bbox[2] - bbox[0] <= width - 40:
-                current_line = test_line
-            else:
-                if current_line:
-                    lines.append(current_line)
-                current_line = word
-        if current_line:
-            lines.append(current_line)
-        total_height = sum(draw.textbbox((0, 0), line, font=font)[3] - draw.textbbox((0, 0), line, font=font)[1] + 5 for line in lines) - 5
-        y_start = height - 10 - total_height
-        draw_text_with_outline(draw, bottom_text, y_offset=y_start, is_top=False)
-
-    output = io.BytesIO()
-    image.save(output, format="JPEG", quality=95)
-    output.seek(0)
-    await message.reply_photo(photo=output, caption="🎭 Твой мем готов!")
 
 # ==================== КУЛДАУНЫ (команды владельца) ====================
 async def cooldown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -647,7 +606,7 @@ async def cooldown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton(f"Bred ({b}с)", callback_data="cd:bred")],
     ]
     await update.message.reply_text(
-        f"⚙️ Кулдауны:\n/fold: {f}с\n/litvin: {l}с\n/bred: {b}с\n\nВыбери команду:",
+        f"⚙️ Кулдауны:\n/folk: {f}с\n/litvin: {l}с\n/bred: {b}с\n\nВыбери команду:",
         reply_markup=InlineKeyboardMarkup(kb)
     )
 
