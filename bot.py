@@ -8,6 +8,7 @@ import os
 import io
 import threading
 import base64
+import aiohttp
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from telegram import Update, InlineQueryResultCachedSticker, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
@@ -22,12 +23,17 @@ from telegram.ext import (
     filters,
 )
 
+# ==================== ТОКЕНЫ И КЛЮЧИ ====================
 TOKEN = "8891403100:AAGLU4dVDJWEsZFdmXGihyzbGUrGmUvDrcg"
 MINI_APP_URL = "https://jalal-p7p9.onrender.com"
 
-# ========== API-ключ ImgBB (замените на свой) ==========
+# API-ключ ImgBB (замените на свой)
 IMGBB_API_KEY = "2bbaa8526b22fc8d7930403e13dbbdcd"
 
+# API-ключ Unsplash (получите на unsplash.com/developers)
+UNSPLASH_ACCESS_KEY = "VTNenGnCKKbtcMddc_oN6qg5AGpmEXKUMDHK99qkbiA"
+
+# ==================== СЛОВА ДЛЯ /sosat ====================
 RANDOM_WORDS = [
     "кот", "привет", "чайник", "Владимир", "мандарин", "космос", "велосипед",
     "одуванчик", "банан", "дракон", "шлёпа", "мем", "бот", "пельмень",
@@ -36,8 +42,8 @@ RANDOM_WORDS = [
     "огурец", "микрофон", "самокат", "трамвай", "облако", "одуван"
 ]
 
-# ==================== СТИКЕРЫ ====================
-# /folk: ByFolkValley (120) + AtlasScottishFold (120) + Vooocaaa_by_fStikBot (32) = 272
+# ==================== СТИКЕРЫ (сокращённые примеры) ====================
+# !!! ЗАМЕНИТЕ на свои полные списки стикеров !!!
 ALL_STICKERS = [
     "CAACAgIAAxUAAWokXU38_MuMDT7hhvRuZctYuCKJAALIoAACX-ToSLg5DDhF1X44OwQ",
     "CAACAgIAAxUAAWokXU3n6LDpd626aZfX7VT1CippAAKapAAC1p_wSAAByejMhUYpHjsE",
@@ -313,7 +319,6 @@ ALL_STICKERS = [
     "CAACAgIAAxUAAWokZOlA-m4Oz3P_pleNlJMsmbrxAAI_qQACTY65SKYfiqLxVKYhOwQ",
 ]
 
-# Стикеры для /litvin: pk_2746611_by_Ctikerubot (15)
 litvin_stickers = [
     "CAACAgIAAxUAAWokZOof_KEL11Lbga2X2TTEDJtmAAL8VwACkbZhSmesSj3bmwlsOwQ",
     "CAACAgIAAxUAAWokZOrFnMJcM70JZo862P7WPqO5AAJDXAAC1MFhSsHcJdIERCutOwQ",
@@ -332,7 +337,6 @@ litvin_stickers = [
     "CAACAgIAAxUAAWokZOo_wrR1tZvLom5v9Hn_REedAAKJTwACw89gSkNYL_2LDqBFOwQ",
 ]
 
-# Стикеры для /bred: DouBlya (33) + Fartsmopington_by_MoiStikiBot (48) = 81
 bred_stickers = [
     "CAACAgIAAxUAAWokZOrge-Tda8NNA5mVI1yQD9RzAAImmwACEMfgSLuhxfmBNlC7OwQ",
     "CAACAgIAAxUAAWokZOp3vYT_kqgVC0IBqWt9fJ5rAAKslQAC0AvgSC6z5DOASxnmOwQ",
@@ -384,9 +388,11 @@ bred_stickers = [
     "CAACAgIAAxUAAWokZOrG40e6MTW66zTsxm4Z-loOAAJOmAACHOB4SE3Urosl5Hw4OwQ",
 ]
 
+# ==================== СЛОВАРИ ДЛЯ КУЛДАУНОВ ====================
 cooldowns_folk = {}
 cooldowns_litvin = {}
 cooldowns_bred = {}
+cooldowns_search = {}          # новый словарь для /search
 chat_cooldowns = {}
 pending_cooldown_input = {}
 
@@ -404,7 +410,7 @@ def upload_to_imgbb(image_bytes):
         "key": IMGBB_API_KEY,
         "image": encoded_image,
         "name": "meme.jpg",
-        "expiration": 86400  # удалится через сутки, можно убрать
+        "expiration": 86400
     }
     try:
         resp = requests.post(url, data=payload, timeout=30)
@@ -413,10 +419,10 @@ def upload_to_imgbb(image_bytes):
         if data.get("success"):
             return data["data"]["url"]
         else:
-            print(f"Ошибка ImgBB: {data}")
+            logging.error(f"Ошибка ImgBB: {data}")
             return None
     except Exception as e:
-        print(f"Исключение при загрузке на ImgBB: {e}")
+        logging.error(f"Исключение при загрузке на ImgBB: {e}")
         return None
 
 # ==================== ФУНКЦИИ КУЛДАУНОВ ====================
@@ -437,15 +443,26 @@ def save_user_groups():
         pass
 
 def get_cd(chat_id, command):
-    # Кулдаун по умолчанию — 60 секунд
     if chat_id not in chat_cooldowns:
-        chat_cooldowns[chat_id] = {'folk': 60, 'litvin': 60, 'bred': 60}
-    return chat_cooldowns[chat_id].get(command, 60)
+        # Кулдауны по умолчанию: 60 сек для стикеров, 600 сек (10 мин) для search
+        chat_cooldowns[chat_id] = {
+            'folk': 60,
+            'litvin': 60,
+            'bred': 60,
+            'search': 600
+        }
+    return chat_cooldowns[chat_id].get(command, 600 if command == 'search' else 60)
 
 def get_cd_dict(command):
-    if command == 'folk': return cooldowns_folk
-    elif command == 'litvin': return cooldowns_litvin
-    return cooldowns_bred
+    if command == 'folk':
+        return cooldowns_folk
+    elif command == 'litvin':
+        return cooldowns_litvin
+    elif command == 'bred':
+        return cooldowns_bred
+    elif command == 'search':
+        return cooldowns_search
+    return {}
 
 def check_cd(chat_id, user_id, command):
     duration = get_cd(chat_id, command)
@@ -462,6 +479,26 @@ def check_cd(chat_id, user_id, command):
 def use_cd(chat_id, user_id, command):
     get_cd_dict(command)[(chat_id, user_id)] = datetime.now()
 
+# ==================== АСИНХРОННЫЙ ПОИСК НА UNSPLASH ====================
+async def search_unsplash(query, per_page=10):
+    """Ищет картинки на Unsplash и возвращает список URL."""
+    url = "https://api.unsplash.com/search/photos"
+    headers = {"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"}
+    params = {"query": query, "per_page": per_page, "page": 1}
+
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, headers=headers, params=params) as resp:
+                if resp.status != 200:
+                    logging.error(f"Unsplash ошибка: {resp.status}")
+                    return []
+                data = await resp.json()
+                results = data.get("results", [])
+                return [item["urls"]["regular"] for item in results]
+        except Exception as e:
+            logging.error(f"Ошибка Unsplash: {e}")
+            return []
+
 # ==================== КОМАНДЫ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
@@ -472,11 +509,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• /folk, /litvin, /bred — стикеры\n"
             "• /sosat — бессвязный бред\n"
             "• /zabava — мем из фото + текст\n"
+            "• /search — поиск картинок (1 в группе, 3 в лс)\n"
             "• /cooldown — кулдауны (владелец группы)",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     else:
-        await update.message.reply_text("Я в группе! /folk /litvin /bred /sosat /zabava /cooldown")
+        await update.message.reply_text("Я в группе! /folk /litvin /bred /sosat /zabava /search /cooldown")
 
 async def folk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id, user_id = update.effective_chat.id, update.effective_user.id
@@ -521,36 +559,70 @@ async def sosat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     words = random.choices(RANDOM_WORDS, k=random.randint(3, 6))
     await update.message.reply_text(" ".join(words))
 
-# ==================== /zabava (с memegen.link и ImgBB) ====================
+# ==================== /zabava (с ImgBB) ====================
 async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
 
-    # Проверяем наличие фото
+    # Проверка наличия фото
     if not message.photo and not (message.reply_to_message and message.reply_to_message.photo):
         await message.reply_text("📸 Отправь фото с подписью /zabava текст или ответь командой на фото.")
         return
 
-    # Получаем текст команды
-    text = " ".join(context.args) if context.args else ""
-    if not text:
+    args = context.args
+    if not args:
         await message.reply_text(
-            "❌ Напиши текст: /zabava Верхний текст и Нижний текст\n"
-            "Пример: /zabava Привет и Мир\n"
-            "Разделители: ' и ', ' | ', '|'"
+            "❌ Напиши текст.\n\n"
+            "Примеры:\n"
+            "/zabava 1 Текст сверху\n"
+            "/zabava 2 Текст снизу\n"
+            "/zabava 1 Верхний 2 Нижний\n"
+            "Если без цифр, текст будет сверху."
         )
         return
 
-    # Разделяем на верхний и нижний текст
+    # Ищем маркеры 1 и 2
+    try:
+        idx1 = args.index("1")
+    except ValueError:
+        idx1 = -1
+    try:
+        idx2 = args.index("2")
+    except ValueError:
+        idx2 = -1
+
     top_text = ""
     bottom_text = ""
-    for sep in [" и ", " | ", "|"]:
-        if sep in text:
-            parts = text.split(sep, 1)
-            top_text = parts[0].strip()
-            bottom_text = parts[1].strip() if len(parts) > 1 else ""
-            break
-    if not top_text:
-        top_text = text.strip()
+
+    # Если нет маркеров – весь текст верхний
+    if idx1 == -1 and idx2 == -1:
+        top_text = " ".join(args).strip()
+    else:
+        # Обработка маркера 1 (верхний)
+        if idx1 != -1:
+            # Собираем всё после 1 до маркера 2 (если есть и он больше) или до конца
+            if idx2 != -1 and idx2 > idx1:
+                top_parts = args[idx1+1:idx2]
+            else:
+                top_parts = args[idx1+1:]
+            top_text = " ".join(top_parts).strip()
+        # Обработка маркера 2 (нижний)
+        if idx2 != -1:
+            # Собираем всё после 2 до маркера 1 (если есть и он больше) или до конца
+            if idx1 != -1 and idx1 > idx2:
+                bottom_parts = args[idx2+1:idx1]
+            else:
+                bottom_parts = args[idx2+1:]
+            bottom_text = " ".join(bottom_parts).strip()
+        # Если маркеры идут в обратном порядке (2 ... 1), то предыдущая логика работает,
+        # но для верхнего мы взяли от 1 до 2, но если 2 раньше, то idx2 < idx1, тогда верхний собирается от 1 до конца,
+        # а нижний от 2 до 1 – и это корректно.
+
+    # Если оба текста пустые – ошибка
+    if not top_text and not bottom_text:
+        await message.reply_text("❌ Текст не распознан. Пример: /zabava 1 Привет 2 Мир")
+        return
+
+    # --- Дальше код скачивания фото, загрузки на ImgBB, генерации мема (без изменений) ---
 
     # Скачиваем фото
     if message.photo:
@@ -568,7 +640,6 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(f"❌ Ошибка загрузки фото: {e}")
         return
 
-    # Загружаем на ImgBB (в отдельном потоке)
     loop = asyncio.get_event_loop()
     try:
         photo_url = await loop.run_in_executor(None, upload_to_imgbb, image_data)
@@ -579,14 +650,13 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(f"❌ Ошибка загрузки на хостинг: {e}")
         return
 
-    # Формируем URL для memegen.link
+    # Кодируем текст и фон
     top_enc = urllib.parse.quote(top_text if top_text else "_")
     bottom_enc = urllib.parse.quote(bottom_text if bottom_text else "_")
     bg_enc = urllib.parse.quote(photo_url)
 
     url = f"https://api.memegen.link/images/custom/{top_enc}/{bottom_enc}.png?background={bg_enc}&font=impact"
 
-    # Скачиваем готовый мем
     try:
         response = await loop.run_in_executor(None, requests.get, url)
         if response.status_code != 200:
@@ -596,6 +666,69 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_photo(photo=meme_bytes, caption="🎭 Твой мем готов!")
     except Exception as e:
         await message.reply_text(f"❌ Ошибка при создании мема: {e}")
+
+# ==================== /search (Unsplash) ====================
+async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Поиск картинок на Unsplash."""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    message = update.message
+
+    # Проверка кулдауна
+    cool, remain = check_cd(chat_id, user_id, 'search')
+    if cool:
+        m, s = divmod(remain.seconds, 60)
+        await message.reply_text(f"⏳ Подожди {m} мин {s} сек", quote=True)
+        return
+
+    # Получаем запрос
+    query = " ".join(context.args) if context.args else ""
+    if not query:
+        await message.reply_text("❌ Напиши запрос: /search кот")
+        return
+
+    status_msg = await message.reply_text(f"🔍 Ищу картинки по запросу: {query}...")
+
+    # Ищем картинки (асинхронно)
+    try:
+        urls = await search_unsplash(query, per_page=10)
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Ошибка поиска: {e}")
+        return
+
+    if not urls:
+        await status_msg.edit_text(f"❌ Ничего не найдено по запросу: {query}")
+        return
+
+    # Определяем сколько картинок отправить
+    if update.effective_chat.type == "private":
+        count = min(3, len(urls))
+        selected = random.sample(urls, count)
+        caption = f"🖼️ Нашёл {count} картинок по запросу: {query}"
+    else:
+        count = 1
+        selected = [random.choice(urls)]
+        caption = f"🖼️ Картинка по запросу: {query}"
+
+    # Удаляем статус
+    await status_msg.delete()
+
+    # Отправляем картинки
+    loop = asyncio.get_event_loop()
+    for idx, url in enumerate(selected):
+        try:
+            # Скачиваем картинку
+            response = await loop.run_in_executor(None, requests.get, url)
+            if response.status_code == 200:
+                cap = caption if idx == 0 else ""
+                await message.reply_photo(photo=response.content, caption=cap)
+            else:
+                await message.reply_text(f"❌ Не удалось загрузить картинку: {url[:50]}...")
+        except Exception as e:
+            await message.reply_text(f"❌ Ошибка при загрузке: {e}")
+
+    # Применяем кулдаун после успешной отправки
+    use_cd(chat_id, user_id, 'search')
 
 # ==================== КУЛДАУНЫ (команды владельца) ====================
 async def cooldown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -611,14 +744,15 @@ async def cooldown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         await update.message.reply_text("Бот должен быть админом.")
         return
-    f, l, b = get_cd(chat.id, 'folk'), get_cd(chat.id, 'litvin'), get_cd(chat.id, 'bred')
+    f, l, b, s = get_cd(chat.id, 'folk'), get_cd(chat.id, 'litvin'), get_cd(chat.id, 'bred'), get_cd(chat.id, 'search')
     kb = [
         [InlineKeyboardButton(f"Folk ({f}с)", callback_data="cd:folk")],
         [InlineKeyboardButton(f"Litvin ({l}с)", callback_data="cd:litvin")],
         [InlineKeyboardButton(f"Bred ({b}с)", callback_data="cd:bred")],
+        [InlineKeyboardButton(f"Search ({s}с)", callback_data="cd:search")],
     ]
     await update.message.reply_text(
-        f"⚙️ Кулдауны:\n/folk: {f}с\n/litvin: {l}с\n/bred: {b}с\n\nВыбери команду:",
+        f"⚙️ Кулдауны:\n/folk: {f}с\n/litvin: {l}с\n/bred: {b}с\n/search: {s}с\n\nВыбери команду:",
         reply_markup=InlineKeyboardMarkup(kb)
     )
 
@@ -682,6 +816,7 @@ def main():
     app.add_handler(CommandHandler("bred", bred))
     app.add_handler(CommandHandler("sosat", sosat))
     app.add_handler(CommandHandler("zabava", zabava))
+    app.add_handler(CommandHandler("search", search))          # новая команда
     app.add_handler(CommandHandler("cooldown", cooldown_cmd))
     app.add_handler(InlineQueryHandler(inline_query))
     app.add_handler(CallbackQueryHandler(cd_button, pattern="^cd:"))
