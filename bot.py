@@ -23,6 +23,10 @@ from telegram.ext import (
     filters,
 )
 
+# ==================== ПЕРЕВОДЧИК ====================
+from googletrans import Translator
+translator = Translator()
+
 # ==================== ТОКЕНЫ И КЛЮЧИ ====================
 TOKEN = "8891403100:AAGLU4dVDJWEsZFdmXGihyzbGUrGmUvDrcg"
 MINI_APP_URL = "https://jalal-p7p9.onrender.com"
@@ -425,6 +429,16 @@ def upload_to_imgbb(image_bytes):
         logging.error(f"Исключение при загрузке на ImgBB: {e}")
         return None
 
+# ==================== ФУНКЦИЯ ПЕРЕВОДА ====================
+def translate_text(text, target_lang='en'):
+    """Переводит текст на английский язык. В случае ошибки возвращает оригинал."""
+    try:
+        translation = translator.translate(text, dest=target_lang)
+        return translation.text
+    except Exception as e:
+        logging.error(f"Ошибка перевода: {e}")
+        return text
+
 # ==================== ФУНКЦИИ КУЛДАУНОВ ====================
 def load_user_groups():
     global user_groups
@@ -508,7 +522,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• @folkvalleybot в любом чате — случайный стикер\n"
             "• /folk, /litvin, /bred — стикеры\n"
             "• /sosat — бессвязный бред\n"
-            "• /zabava — мем из фото + текст\n"
+            "• /zabava — мем из фото + текст (1 верх, 2 низ)\n"
             "• /search — поиск картинок (1 в группе, 3 в лс)\n"
             "• /cooldown — кулдауны (владелец группы)",
             reply_markup=InlineKeyboardMarkup(keyboard)
@@ -599,7 +613,6 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         # Обработка маркера 1 (верхний)
         if idx1 != -1:
-            # Собираем всё после 1 до маркера 2 (если есть и он больше) или до конца
             if idx2 != -1 and idx2 > idx1:
                 top_parts = args[idx1+1:idx2]
             else:
@@ -607,22 +620,15 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
             top_text = " ".join(top_parts).strip()
         # Обработка маркера 2 (нижний)
         if idx2 != -1:
-            # Собираем всё после 2 до маркера 1 (если есть и он больше) или до конца
             if idx1 != -1 and idx1 > idx2:
                 bottom_parts = args[idx2+1:idx1]
             else:
                 bottom_parts = args[idx2+1:]
             bottom_text = " ".join(bottom_parts).strip()
-        # Если маркеры идут в обратном порядке (2 ... 1), то предыдущая логика работает,
-        # но для верхнего мы взяли от 1 до 2, но если 2 раньше, то idx2 < idx1, тогда верхний собирается от 1 до конца,
-        # а нижний от 2 до 1 – и это корректно.
 
-    # Если оба текста пустые – ошибка
     if not top_text and not bottom_text:
         await message.reply_text("❌ Текст не распознан. Пример: /zabava 1 Привет 2 Мир")
         return
-
-    # --- Дальше код скачивания фото, загрузки на ImgBB, генерации мема (без изменений) ---
 
     # Скачиваем фото
     if message.photo:
@@ -667,9 +673,9 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await message.reply_text(f"❌ Ошибка при создании мема: {e}")
 
-# ==================== /search (Unsplash) ====================
+# ==================== /search (Unsplash с переводом) ====================
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Поиск картинок на Unsplash."""
+    """Поиск картинок на Unsplash с автоматическим переводом запроса на английский."""
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     message = update.message
@@ -689,9 +695,24 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     status_msg = await message.reply_text(f"🔍 Ищу картинки по запросу: {query}...")
 
-    # Ищем картинки (асинхронно)
+    loop = asyncio.get_event_loop()
+
+    # ---- ПЕРЕВОД ЗАПРОСА ----
     try:
-        urls = await search_unsplash(query, per_page=10)
+        # Переводим запрос на английский (синхронно, поэтому в потоке)
+        translated_query = await loop.run_in_executor(None, translate_text, query, 'en')
+        logging.info(f"Переведено: '{query}' -> '{translated_query}'")
+        # Если перевод не удался, используем оригинал
+        if not translated_query:
+            translated_query = query
+        search_query = translated_query
+    except Exception as e:
+        logging.error(f"Ошибка перевода, использую оригинал: {e}")
+        search_query = query
+
+    # Ищем картинки на Unsplash с переведённым запросом
+    try:
+        urls = await search_unsplash(search_query, per_page=10)
     except Exception as e:
         await status_msg.edit_text(f"❌ Ошибка поиска: {e}")
         return
@@ -710,14 +731,11 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         selected = [random.choice(urls)]
         caption = f"🖼️ Картинка по запросу: {query}"
 
-    # Удаляем статус
     await status_msg.delete()
 
     # Отправляем картинки
-    loop = asyncio.get_event_loop()
     for idx, url in enumerate(selected):
         try:
-            # Скачиваем картинку
             response = await loop.run_in_executor(None, requests.get, url)
             if response.status_code == 200:
                 cap = caption if idx == 0 else ""
@@ -816,7 +834,7 @@ def main():
     app.add_handler(CommandHandler("bred", bred))
     app.add_handler(CommandHandler("sosat", sosat))
     app.add_handler(CommandHandler("zabava", zabava))
-    app.add_handler(CommandHandler("search", search))          # новая команда
+    app.add_handler(CommandHandler("search", search))
     app.add_handler(CommandHandler("cooldown", cooldown_cmd))
     app.add_handler(InlineQueryHandler(inline_query))
     app.add_handler(CallbackQueryHandler(cd_button, pattern="^cd:"))
