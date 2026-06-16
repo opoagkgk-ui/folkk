@@ -46,8 +46,7 @@ RANDOM_WORDS = [
     "огурец", "микрофон", "самокат", "трамвай", "облако", "одуван"
 ]
 
-# ==================== СТИКЕРЫ (сокращённые примеры) ====================
-# !!! ЗАМЕНИТЕ на свои полные списки стикеров !!!
+# ==================== СТИКЕРЫ ====================
 ALL_STICKERS = [
     "CAACAgIAAxUAAWokXU38_MuMDT7hhvRuZctYuCKJAALIoAACX-ToSLg5DDhF1X44OwQ",
     "CAACAgIAAxUAAWokXU3n6LDpd626aZfX7VT1CippAAKapAAC1p_wSAAByejMhUYpHjsE",
@@ -396,7 +395,7 @@ bred_stickers = [
 cooldowns_folk = {}
 cooldowns_litvin = {}
 cooldowns_bred = {}
-cooldowns_search = {}          # новый словарь для /search
+cooldowns_search = {}
 chat_cooldowns = {}
 pending_cooldown_input = {}
 
@@ -458,7 +457,6 @@ def save_user_groups():
 
 def get_cd(chat_id, command):
     if chat_id not in chat_cooldowns:
-        # Кулдауны по умолчанию: 60 сек для стикеров, 600 сек (10 мин) для search
         chat_cooldowns[chat_id] = {
             'folk': 60,
             'litvin': 60,
@@ -495,11 +493,9 @@ def use_cd(chat_id, user_id, command):
 
 # ==================== АСИНХРОННЫЙ ПОИСК НА UNSPLASH ====================
 async def search_unsplash(query, per_page=10):
-    """Ищет картинки на Unsplash и возвращает список URL."""
     url = "https://api.unsplash.com/search/photos"
     headers = {"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"}
     params = {"query": query, "per_page": per_page, "page": 1}
-
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(url, headers=headers, params=params) as resp:
@@ -573,11 +569,9 @@ async def sosat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     words = random.choices(RANDOM_WORDS, k=random.randint(3, 6))
     await update.message.reply_text(" ".join(words))
 
-# ==================== /zabava (с ImgBB) ====================
+# ==================== /zabava ====================
 async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
-
-    # Проверка наличия фото
     if not message.photo and not (message.reply_to_message and message.reply_to_message.photo):
         await message.reply_text("📸 Отправь фото с подписью /zabava текст или ответь командой на фото.")
         return
@@ -594,7 +588,6 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Ищем маркеры 1 и 2
     try:
         idx1 = args.index("1")
     except ValueError:
@@ -607,18 +600,15 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
     top_text = ""
     bottom_text = ""
 
-    # Если нет маркеров – весь текст верхний
     if idx1 == -1 and idx2 == -1:
         top_text = " ".join(args).strip()
     else:
-        # Обработка маркера 1 (верхний)
         if idx1 != -1:
             if idx2 != -1 and idx2 > idx1:
                 top_parts = args[idx1+1:idx2]
             else:
                 top_parts = args[idx1+1:]
             top_text = " ".join(top_parts).strip()
-        # Обработка маркера 2 (нижний)
         if idx2 != -1:
             if idx1 != -1 and idx1 > idx2:
                 bottom_parts = args[idx2+1:idx1]
@@ -630,7 +620,6 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("❌ Текст не распознан. Пример: /zabava 1 Привет 2 Мир")
         return
 
-    # Скачиваем фото
     if message.photo:
         file_id = message.photo[-1].file_id
     else:
@@ -656,7 +645,6 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(f"❌ Ошибка загрузки на хостинг: {e}")
         return
 
-    # Кодируем текст и фон
     top_enc = urllib.parse.quote(top_text if top_text else "_")
     bottom_enc = urllib.parse.quote(bottom_text if bottom_text else "_")
     bg_enc = urllib.parse.quote(photo_url)
@@ -673,44 +661,35 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await message.reply_text(f"❌ Ошибка при создании мема: {e}")
 
-# ==================== /search (Unsplash с переводом) ====================
+# ==================== /search ====================
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Поиск картинок на Unsplash с автоматическим переводом запроса на английский."""
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     message = update.message
 
-    # Проверка кулдауна
     cool, remain = check_cd(chat_id, user_id, 'search')
     if cool:
         m, s = divmod(remain.seconds, 60)
         await message.reply_text(f"⏳ Подожди {m} мин {s} сек", quote=True)
         return
 
-    # Получаем запрос
     query = " ".join(context.args) if context.args else ""
     if not query:
         await message.reply_text("❌ Напиши запрос: /search кот")
         return
 
     status_msg = await message.reply_text(f"🔍 Ищу картинки по запросу: {query}...")
-
     loop = asyncio.get_event_loop()
 
-    # ---- ПЕРЕВОД ЗАПРОСА ----
+    # Переводим запрос
     try:
-        # Переводим запрос на английский (синхронно, поэтому в потоке)
         translated_query = await loop.run_in_executor(None, translate_text, query, 'en')
         logging.info(f"Переведено: '{query}' -> '{translated_query}'")
-        # Если перевод не удался, используем оригинал
-        if not translated_query:
-            translated_query = query
-        search_query = translated_query
+        search_query = translated_query if translated_query else query
     except Exception as e:
         logging.error(f"Ошибка перевода, использую оригинал: {e}")
         search_query = query
 
-    # Ищем картинки на Unsplash с переведённым запросом
     try:
         urls = await search_unsplash(search_query, per_page=10)
     except Exception as e:
@@ -721,7 +700,6 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text(f"❌ Ничего не найдено по запросу: {query}")
         return
 
-    # Определяем сколько картинок отправить
     if update.effective_chat.type == "private":
         count = min(3, len(urls))
         selected = random.sample(urls, count)
@@ -733,7 +711,6 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await status_msg.delete()
 
-    # Отправляем картинки
     for idx, url in enumerate(selected):
         try:
             response = await loop.run_in_executor(None, requests.get, url)
@@ -745,10 +722,9 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await message.reply_text(f"❌ Ошибка при загрузке: {e}")
 
-    # Применяем кулдаун после успешной отправки
     use_cd(chat_id, user_id, 'search')
 
-# ==================== КУЛДАУНЫ (команды владельца) ====================
+# ==================== КУЛДАУНЫ ====================
 async def cooldown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat, user = update.effective_chat, update.effective_user
     if chat.type not in ("group", "supergroup"):
@@ -810,7 +786,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         InlineQueryResultCachedSticker(id=str(random.randint(100000, 999999)), sticker_file_id=sid)
     ], cache_time=0)
 
-# ==================== FLASK ДЛЯ MINI APP ====================
+# ==================== FLASK ====================
 flask_app = Flask(__name__)
 
 @flask_app.route('/getUserGroups')
