@@ -8,7 +8,6 @@ import os
 import io
 import threading
 from datetime import datetime, timedelta
-from catbox_uploader import CatboxUploader
 from flask import Flask, request, jsonify
 from telegram import Update, InlineQueryResultCachedSticker, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.constants import ChatMemberStatus
@@ -394,16 +393,17 @@ logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=lo
 
 # ==================== ФУНКЦИЯ ЗАГРУЗКИ НА TELEGRAPH ====================
 def upload_to_catbox(image_bytes):
-    """Загружает байты изображения на Catbox.moe и возвращает прямую ссылку."""
+    """Загружает байты изображения на Catbox.moe через простой POST-запрос."""
+    url = "https://catbox.moe/user/api.php"
+    files = {"fileToUpload": ("image.jpg", image_bytes, "image/jpeg")}
+    data = {"reqtype": "fileupload"}
     try:
-        with open("temp_image.jpg", "wb") as f:
-            f.write(image_bytes)
-        
-        uploader = CatboxUploader()
-        file_url = uploader.upload_file('temp_image.jpg')  # без лишних индексов
-        
-        os.remove("temp_image.jpg")
-        return file_url
+        resp = requests.post(url, files=files, data=data, timeout=20)
+        resp.raise_for_status()
+        file_url = resp.text.strip()
+        if file_url.startswith("http"):
+            return file_url
+        return None
     except Exception as e:
         print(f"Ошибка загрузки на Catbox: {e}")
         return None
