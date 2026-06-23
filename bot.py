@@ -1,10 +1,10 @@
+import os
 import logging
 import requests
 import urllib.parse
 import asyncio
 import random
 import json
-import os
 import io
 import threading
 import base64
@@ -22,21 +22,18 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-
-# ==================== ПЕРЕВОДЧИК (deep_translator) ====================
 from deep_translator import GoogleTranslator
+from gtts import gTTS
+from io import BytesIO
 
-# ==================== ТОКЕНЫ И КЛЮЧИ ====================
+# ==================== ТОКЕН ИЗ ОКРУЖЕНИЯ ====================
 TOKEN = os.environ.get("API_TOKEN")
 if not TOKEN:
     raise ValueError("Переменная окружения API_TOKEN не установлена!")
-    
+
 MINI_APP_URL = "https://jalal-p7p9.onrender.com"
 
-# API-ключ ImgBB (замените на свой)
 IMGBB_API_KEY = "2bbaa8526b22fc8d7930403e13dbbdcd"
-
-# API-ключ Unsplash (получите на unsplash.com/developers)
 UNSPLASH_ACCESS_KEY = "VTNenGnCKKbtcMddc_oN6qg5AGpmEXKUMDHK99qkbiA"
 
 # ==================== СЛОВА ДЛЯ /sosat ====================
@@ -48,7 +45,7 @@ RANDOM_WORDS = [
     "огурец", "микрофон", "самокат", "трамвай", "облако", "одуван"
 ]
 
-# ==================== СТИКЕРЫ (полный список) ====================
+# ==================== СТИКЕРЫ (ПОЛНЫЕ СПИСКИ) ====================
 ALL_STICKERS = [
     "CAACAgIAAxUAAWokXU38_MuMDT7hhvRuZctYuCKJAALIoAACX-ToSLg5DDhF1X44OwQ",
     "CAACAgIAAxUAAWokXU3n6LDpd626aZfX7VT1CippAAKapAAC1p_wSAAByejMhUYpHjsE",
@@ -398,6 +395,7 @@ cooldowns_folk = {}
 cooldowns_litvin = {}
 cooldowns_bred = {}
 cooldowns_search = {}
+cooldowns_voice = {}
 chat_cooldowns = {}
 pending_cooldown_input = {}
 
@@ -408,7 +406,6 @@ logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=lo
 
 # ==================== ЗАГРУЗКА НА IMGBB ====================
 def upload_to_imgbb(image_bytes):
-    """Загружает байты изображения на ImgBB и возвращает прямую ссылку."""
     url = "https://api.imgbb.com/1/upload"
     encoded_image = base64.b64encode(image_bytes).decode('utf-8')
     payload = {
@@ -432,13 +429,12 @@ def upload_to_imgbb(image_bytes):
 
 # ==================== ФУНКЦИЯ ПЕРЕВОДА ====================
 def translate_text(text, target_lang='en'):
-    """Переводит текст на английский через GoogleTranslator (без ключа)."""
     try:
         translated = GoogleTranslator(source='auto', target=target_lang).translate(text)
         return translated
     except Exception as e:
         logging.error(f"Ошибка перевода: {e}")
-        return text  # возвращаем оригинал при ошибке
+        return text
 
 # ==================== ФУНКЦИИ КУЛДАУНОВ ====================
 def load_user_groups():
@@ -463,9 +459,10 @@ def get_cd(chat_id, command):
             'folk': 60,
             'litvin': 60,
             'bred': 60,
-            'search': 600
+            'search': 600,
+            'voice': 30
         }
-    return chat_cooldowns[chat_id].get(command, 600 if command == 'search' else 60)
+    return chat_cooldowns[chat_id].get(command, 60 if command != 'search' else 600)
 
 def get_cd_dict(command):
     if command == 'folk':
@@ -476,6 +473,8 @@ def get_cd_dict(command):
         return cooldowns_bred
     elif command == 'search':
         return cooldowns_search
+    elif command == 'voice':
+        return cooldowns_voice
     return {}
 
 def check_cd(chat_id, user_id, command):
@@ -511,6 +510,16 @@ async def search_unsplash(query, per_page=10):
             logging.error(f"Ошибка Unsplash: {e}")
             return []
 
+# ==================== ПРИВЕТСТВИЕ НОВЫХ УЧАСТНИКОВ ====================
+async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    for member in update.message.new_chat_members:
+        if member.id == context.bot.id:
+            continue
+        if member.username:
+            await update.message.reply_text(f"h @{member.username} !")
+        else:
+            await update.message.reply_text(f"h {member.first_name} !")
+
 # ==================== КОМАНДЫ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
@@ -522,11 +531,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• /sosat — бессвязный бред\n"
             "• /zabava — мем из фото + текст (1 верх, 2 низ)\n"
             "• /search — поиск картинок (1 в группе, 3 в лс)\n"
+            "• /voice — озвучить текст\n"
             "• /cooldown — кулдауны (владелец группы)",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     else:
-        await update.message.reply_text("Я в группе! /folk /litvin /bred /sosat /zabava /search /cooldown")
+        await update.message.reply_text("Я в группе! /folk /litvin /bred /sosat /zabava /search /voice /cooldown")
 
 async def folk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id, user_id = update.effective_chat.id, update.effective_user.id
@@ -683,7 +693,6 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await message.reply_text(f"🔍 Ищу картинки по запросу: {query}...")
     loop = asyncio.get_event_loop()
 
-    # Переводим запрос
     try:
         translated_query = await loop.run_in_executor(None, translate_text, query, 'en')
         logging.info(f"Переведено: '{query}' -> '{translated_query}'")
@@ -726,6 +735,33 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     use_cd(chat_id, user_id, 'search')
 
+# ==================== /voice ====================
+async def voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    message = update.message
+
+    cool, remain = check_cd(chat_id, user_id, 'voice')
+    if cool:
+        m, s = divmod(remain.seconds, 60)
+        await message.reply_text(f"⏳ Подожди {m} мин {s} сек", quote=True)
+        return
+
+    text = " ".join(context.args) if context.args else ""
+    if not text:
+        await message.reply_text("❌ Напиши текст: /voice Привет мир")
+        return
+
+    try:
+        tts = gTTS(text=text, lang='ru')
+        audio_bytes = BytesIO()
+        tts.write_to_fp(audio_bytes)
+        audio_bytes.seek(0)
+        await message.reply_voice(voice=audio_bytes, caption="🔊 Озвучено!")
+        use_cd(chat_id, user_id, 'voice')
+    except Exception as e:
+        await message.reply_text(f"❌ Ошибка озвучивания: {e}")
+
 # ==================== КУЛДАУНЫ ====================
 async def cooldown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat, user = update.effective_chat, update.effective_user
@@ -740,15 +776,16 @@ async def cooldown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         await update.message.reply_text("Бот должен быть админом.")
         return
-    f, l, b, s = get_cd(chat.id, 'folk'), get_cd(chat.id, 'litvin'), get_cd(chat.id, 'bred'), get_cd(chat.id, 'search')
+    f, l, b, s, v = get_cd(chat.id, 'folk'), get_cd(chat.id, 'litvin'), get_cd(chat.id, 'bred'), get_cd(chat.id, 'search'), get_cd(chat.id, 'voice')
     kb = [
         [InlineKeyboardButton(f"Folk ({f}с)", callback_data="cd:folk")],
         [InlineKeyboardButton(f"Litvin ({l}с)", callback_data="cd:litvin")],
         [InlineKeyboardButton(f"Bred ({b}с)", callback_data="cd:bred")],
         [InlineKeyboardButton(f"Search ({s}с)", callback_data="cd:search")],
+        [InlineKeyboardButton(f"Voice ({v}с)", callback_data="cd:voice")],
     ]
     await update.message.reply_text(
-        f"⚙️ Кулдауны:\n/folk: {f}с\n/litvin: {l}с\n/bred: {b}с\n/search: {s}с\n\nВыбери команду:",
+        f"⚙️ Кулдауны:\n/folk: {f}с\n/litvin: {l}с\n/bred: {b}с\n/search: {s}с\n/voice: {v}с\n\nВыбери команду:",
         reply_markup=InlineKeyboardMarkup(kb)
     )
 
@@ -813,7 +850,9 @@ def main():
     app.add_handler(CommandHandler("sosat", sosat))
     app.add_handler(CommandHandler("zabava", zabava))
     app.add_handler(CommandHandler("search", search))
+    app.add_handler(CommandHandler("voice", voice))
     app.add_handler(CommandHandler("cooldown", cooldown_cmd))
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
     app.add_handler(InlineQueryHandler(inline_query))
     app.add_handler(CallbackQueryHandler(cd_button, pattern="^cd:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cd_input))
