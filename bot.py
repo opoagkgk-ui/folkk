@@ -27,7 +27,7 @@ from telegram.ext import (
 from deep_translator import GoogleTranslator
 
 # ==================== ТОКЕНЫ И КЛЮЧИ ====================
-TOKEN = "8891403100:AAGLU4dVDJWEsZFdmXGihyzbGUrGmUvDrcg"
+TOKEN = "8891403100:AAGWXOfIUooRMVIs5BIaAkFSe5bwGOiCBqc"
 MINI_APP_URL = "https://jalal-p7p9.onrender.com"
 
 # API-ключ ImgBB (замените на свой)
