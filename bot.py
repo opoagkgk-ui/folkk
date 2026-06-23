@@ -27,7 +27,10 @@ from telegram.ext import (
 from deep_translator import GoogleTranslator
 
 # ==================== ТОКЕНЫ И КЛЮЧИ ====================
-TOKEN = "8891403100:AAGWXOfIUooRMVIs5BIaAkFSe5bwGOiCBqc"
+TOKEN = os.environ.get("API_TOKEN")
+if not TOKEN:
+    raise ValueError("Переменная окружения API_TOKEN не установлена!")
+    
 MINI_APP_URL = "https://jalal-p7p9.onrender.com"
 
 # API-ключ ImgBB (замените на свой)
