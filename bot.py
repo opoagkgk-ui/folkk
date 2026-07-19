@@ -961,14 +961,16 @@ async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             games[chat_id]["data"]["tries"] = 0
             games[chat_id]["data"]["users"] = set()
             
-            # Кнопка для завершения
-            kb = [[InlineKeyboardButton("🛑 Завершить игру", callback_data=f"game_stop:{user_id}")]]
+            # Кнопка для ввода числа
+            kb = [
+                [InlineKeyboardButton("🔢 Написать число", callback_data=f"game_input:guess:{user_id}")],
+                [InlineKeyboardButton("🛑 Завершить игру", callback_data=f"game_stop:{user_id}")],
+            ]
             
             await query.edit_message_text(
                 f"🎯 **Игра началась!** (Создатель: @{query.from_user.username or query.from_user.first_name})\n\n"
                 f"Я загадал число от 1 до 100.\n"
-                f"Нажми кнопку ниже, чтобы написать ответ!\n"
-                f"Твоя задача — угадать число!",
+                f"Нажми кнопку «Написать число» и напиши свой вариант!",
                 reply_markup=InlineKeyboardMarkup(kb),
                 parse_mode="Markdown"
             )
@@ -1007,26 +1009,30 @@ async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             games[chat_id]["data"]["answered"] = False
             
             # Кнопка для ответа
-            kb = [[InlineKeyboardButton("✏️ Написать ответ", callback_data=f"game_answer:{user_id}")],
-                  [InlineKeyboardButton("🛑 Завершить игру", callback_data=f"game_stop:{user_id}")]]
+            kb = [
+                [InlineKeyboardButton("✏️ Написать ответ", callback_data=f"game_input:quiz:{user_id}")],
+                [InlineKeyboardButton("🛑 Завершить игру", callback_data=f"game_stop:{user_id}")],
+            ]
             
             await query.edit_message_text(
                 f"🧠 **Викторина!** (Создатель: @{query.from_user.username or query.from_user.first_name})\n\n"
                 f"❓ {q['question']}\n\n"
-                f"Нажми кнопку «Написать ответ» и напиши свой вариант в чате!",
+                f"Нажми кнопку «Написать ответ» и напиши свой вариант!",
                 reply_markup=InlineKeyboardMarkup(kb),
                 parse_mode="Markdown"
             )
 
-# ==================== ОБРАБОТЧИК ОТВЕТА НА ВИКТОРИНУ ====================
-async def game_answer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ==================== ОБРАБОТЧИК ВВОДА ДЛЯ ИГР (универсальный) ====================
+async def game_input_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Разрешает ввод для Угадай числа и Викторины."""
     query = update.callback_query
     await query.answer()
     
     chat_id = query.message.chat_id
     user_id = query.from_user.id
     data_parts = query.data.split(":")
-    initiator_id = int(data_parts[1]) if len(data_parts) > 1 else None
+    game_type = data_parts[1] if len(data_parts) > 1 else None
+    initiator_id = int(data_parts[2]) if len(data_parts) > 2 else None
     
     if chat_id not in games or not games[chat_id]["active"]:
         await query.edit_message_text("❌ Игра уже завершена!")
@@ -1036,16 +1042,22 @@ async def game_answer_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("❌ Только создатель игры может отвечать!")
         return
     
-    if games[chat_id]["type"] != "quiz":
-        await query.edit_message_text("❌ Это не викторина!")
-        return
-    
-    await query.edit_message_text(
-        "✏️ **Напиши свой ответ в чате!**\n\n"
-        "Просто отправь сообщение с ответом.\n"
-        "Например: `8` или `Париж`",
-        parse_mode="Markdown"
-    )
+    if game_type == "guess":
+        await query.edit_message_text(
+            "🔢 **Напиши число в чате!**\n\n"
+            "Просто отправь число от 1 до 100.\n"
+            "Например: `50`",
+            parse_mode="Markdown"
+        )
+    elif game_type == "quiz":
+        await query.edit_message_text(
+            "✏️ **Напиши свой ответ в чате!**\n\n"
+            "Просто отправь сообщение с ответом.\n"
+            "Например: `8` или `Париж`",
+            parse_mode="Markdown"
+        )
+    else:
+        await query.edit_message_text("❌ Неизвестный тип игры!")
 
 # ==================== ОБРАБОТЧИК RPS ====================
 async def game_rps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1096,7 +1108,7 @@ async def game_rps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# ==================== ОБРАБОТЧИК ВВОДА ДЛЯ ИГР ====================
+# ==================== ОБРАБОТЧИК ВВОДА ДЛЯ ИГР (сообщения в чате) ====================
 async def handle_game_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает ввод чисел для угадайки и ответы на викторину."""
     message = update.message
@@ -1300,7 +1312,7 @@ def main():
     app.add_handler(CallbackQueryHandler(game_callback, pattern="^game_start:"))
     app.add_handler(CallbackQueryHandler(game_callback, pattern="^game_stop:"))
     app.add_handler(CallbackQueryHandler(game_rps_callback, pattern="^game_rps:"))
-    app.add_handler(CallbackQueryHandler(game_answer_callback, pattern="^game_answer:"))
+    app.add_handler(CallbackQueryHandler(game_input_callback, pattern="^game_input:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_game_input))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cd_input))
 
@@ -1309,4 +1321,4 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":
-    main() 
+    main()
