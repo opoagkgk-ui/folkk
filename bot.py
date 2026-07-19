@@ -9,6 +9,7 @@ import io
 import threading
 import base64
 import aiohttp
+from collections import defaultdict
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from telegram import Update, InlineQueryResultCachedSticker, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
@@ -45,7 +46,7 @@ RANDOM_WORDS = [
     "огурец", "микрофон", "самокат", "трамвай", "облако", "одуван"
 ]
 
-# ==================== СТИКЕРЫ (ПОЛНЫЕ СПИСКИ) ====================
+# ==================== СТИКЕРЫ ====================
 ALL_STICKERS = [
     "CAACAgIAAxUAAWokXU38_MuMDT7hhvRuZctYuCKJAALIoAACX-ToSLg5DDhF1X44OwQ",
     "CAACAgIAAxUAAWokXU3n6LDpd626aZfX7VT1CippAAKapAAC1p_wSAAByejMhUYpHjsE",
@@ -399,10 +400,44 @@ cooldowns_voice = {}
 chat_cooldowns = {}
 pending_cooldown_input = {}
 
+# ==================== ДЛЯ РЕЙТИНГА ====================
+user_stats = {}  # {chat_id: {user_id: count}}
+USER_STATS_FILE = "user_stats.json"
+
+# ==================== ДЛЯ ИГР ====================
+games = {}  # {chat_id: {"type": str, "number": int, "tries": int, "users": set, "active": bool, "answers": list}}
+
 USER_GROUPS_FILE = "user_groups.json"
 user_groups = {}
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
+
+# ==================== ФУНКЦИИ ДЛЯ РЕЙТИНГА ====================
+def load_stats():
+    global user_stats
+    if os.path.exists(USER_STATS_FILE):
+        try:
+            with open(USER_STATS_FILE, 'r', encoding='utf-8') as f:
+                user_stats = json.load(f)
+                user_stats = {int(k): {int(uid): count for uid, count in v.items()} 
+                              for k, v in user_stats.items()}
+        except:
+            user_stats = {}
+
+def save_stats():
+    try:
+        with open(USER_STATS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(user_stats, f, ensure_ascii=False, indent=2)
+    except:
+        pass
+
+def add_activity(chat_id, user_id):
+    chat_id = int(chat_id)
+    user_id = int(user_id)
+    if chat_id not in user_stats:
+        user_stats[chat_id] = {}
+    user_stats[chat_id][user_id] = user_stats[chat_id].get(user_id, 0) + 1
+    save_stats()
 
 # ==================== ЗАГРУЗКА НА IMGBB ====================
 def upload_to_imgbb(image_bytes):
@@ -512,6 +547,7 @@ async def search_unsplash(query, per_page=10):
 
 # ==================== ПРИВЕТСТВИЕ НОВЫХ УЧАСТНИКОВ ====================
 async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    add_activity(update.effective_chat.id, update.effective_user.id)
     for member in update.message.new_chat_members:
         if member.id == context.bot.id:
             continue
@@ -522,23 +558,34 @@ async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ==================== КОМАНДЫ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    add_activity(update.effective_chat.id, update.effective_user.id)
     if update.effective_chat.type == "private":
         keyboard = [[InlineKeyboardButton("👤 Профиль", web_app=WebAppInfo(url=MINI_APP_URL))]]
         await update.message.reply_text(
             "👋 Привет! Я бот Folk Valley.\n\n"
-            "• @folkvalleybot в любом чате — случайный стикер\n"
-            "• /folk, /litvin, /bred — стикеры\n"
-            "• /sosat — бессвязный бред\n"
-            "• /zabava — мем из фото + текст (1 верх, 2 низ)\n"
-            "• /search — поиск картинок (1 в группе, 3 в лс)\n"
-            "• /voice — озвучить текст\n"
-            "• /cooldown — кулдауны (владелец группы)",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            "🎮 **Игры:**\n"
+            "• `/game` — выбрать игру (угадай число, КНБ, викторина)\n"
+            "• `/top` — топ активных пользователей\n\n"
+            "🐱 **Животные:**\n"
+            "• `/cat` — случайный котик\n"
+            "• `/dog` — случайная собачка\n\n"
+            "🎭 **Развлечения:**\n"
+            "• `/folk`, `/litvin`, `/bred` — стикеры\n"
+            "• `/sosat` — бессвязный бред\n"
+            "• `/zabava` — мем из фото + текст (1 верх, 2 низ)\n"
+            "• `/search` — поиск картинок (1 в группе, 3 в лс)\n"
+            "• `/voice` — озвучить текст\n\n"
+            "⚙️ **Управление:**\n"
+            "• `/cooldown` — кулдауны (владелец группы)\n\n"
+            "🔄 **Триггер:** напиши «бугульма» — получишь стикер!",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
         )
     else:
-        await update.message.reply_text("Я в группе! /folk /litvin /bred /sosat /zabava /search /voice /cooldown")
+        await update.message.reply_text("Я в группе! /folk /litvin /bred /sosat /zabava /search /voice /game /top /cat /dog /cooldown")
 
 async def folk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    add_activity(update.effective_chat.id, update.effective_user.id)
     chat_id, user_id = update.effective_chat.id, update.effective_user.id
     cool, remain = check_cd(chat_id, user_id, 'folk')
     if cool:
@@ -552,6 +599,7 @@ async def folk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     use_cd(chat_id, user_id, 'folk')
 
 async def litvin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    add_activity(update.effective_chat.id, update.effective_user.id)
     chat_id, user_id = update.effective_chat.id, update.effective_user.id
     cool, remain = check_cd(chat_id, user_id, 'litvin')
     if cool:
@@ -565,6 +613,7 @@ async def litvin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     use_cd(chat_id, user_id, 'litvin')
 
 async def bred(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    add_activity(update.effective_chat.id, update.effective_user.id)
     chat_id, user_id = update.effective_chat.id, update.effective_user.id
     cool, remain = check_cd(chat_id, user_id, 'bred')
     if cool:
@@ -578,11 +627,13 @@ async def bred(update: Update, context: ContextTypes.DEFAULT_TYPE):
     use_cd(chat_id, user_id, 'bred')
 
 async def sosat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    add_activity(update.effective_chat.id, update.effective_user.id)
     words = random.choices(RANDOM_WORDS, k=random.randint(3, 6))
     await update.message.reply_text(" ".join(words))
 
 # ==================== /zabava ====================
 async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    add_activity(update.effective_chat.id, update.effective_user.id)
     message = update.message
     if not message.photo and not (message.reply_to_message and message.reply_to_message.photo):
         await message.reply_text("📸 Отправь фото с подписью /zabava текст или ответь командой на фото.")
@@ -675,6 +726,7 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== /search ====================
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    add_activity(update.effective_chat.id, update.effective_user.id)
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     message = update.message
@@ -737,6 +789,7 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== /voice ====================
 async def voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    add_activity(update.effective_chat.id, update.effective_user.id)
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     message = update.message
@@ -761,6 +814,330 @@ async def voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         use_cd(chat_id, user_id, 'voice')
     except Exception as e:
         await message.reply_text(f"❌ Ошибка озвучивания: {e}")
+
+# ==================== /cat ====================
+async def cat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    add_activity(update.effective_chat.id, update.effective_user.id)
+    url = "https://api.thecatapi.com/v1/images/search"
+    try:
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        if data and "url" in data[0]:
+            img_response = requests.get(data[0]["url"], timeout=10)
+            await update.message.reply_photo(photo=img_response.content, caption="🐱 Мяу!")
+        else:
+            await update.message.reply_text("❌ Не удалось найти котика!")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+
+# ==================== /dog ====================
+async def dog(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    add_activity(update.effective_chat.id, update.effective_user.id)
+    url = "https://api.thedogapi.com/v1/images/search"
+    try:
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        if data and "url" in data[0]:
+            img_response = requests.get(data[0]["url"], timeout=10)
+            await update.message.reply_photo(photo=img_response.content, caption="🐶 Гав!")
+        else:
+            await update.message.reply_text("❌ Не удалось найти собачку!")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+
+# ==================== /top ====================
+async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    add_activity(update.effective_chat.id, update.effective_user.id)
+    chat_id = update.effective_chat.id
+    chat_type = update.effective_chat.type
+    
+    if chat_type not in ["group", "supergroup"]:
+        await update.message.reply_text("📊 Топ доступен только в группах!")
+        return
+    
+    stats = user_stats.get(chat_id, {})
+    if not stats:
+        await update.message.reply_text("📊 Пока нет активности в этом чате!")
+        return
+    
+    sorted_users = sorted(stats.items(), key=lambda x: x[1], reverse=True)[:10]
+    
+    top_text = "🏆 **Топ-10 активных пользователей:**\n\n"
+    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    
+    for idx, (user_id, count) in enumerate(sorted_users):
+        try:
+            user = await context.bot.get_chat_member(chat_id, user_id)
+            name = user.user.first_name
+            if user.user.username:
+                name = f"@{user.user.username}"
+        except:
+            name = f"ID: {user_id}"
+        
+        medal = medals[idx] if idx < len(medals) else f"{idx+1}."
+        top_text += f"{medal} **{name}** — {count} действий\n"
+    
+    await update.message.reply_text(top_text, parse_mode="Markdown")
+
+# ==================== /game ====================
+async def game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    add_activity(update.effective_chat.id, update.effective_user.id)
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    message = update.message
+    
+    args = context.args
+    
+    # Показываем меню игры
+    if not args:
+        kb = [
+            [InlineKeyboardButton("🎯 Угадай число", callback_data="game:guess")],
+            [InlineKeyboardButton("✂️ Камень-ножницы-бумага", callback_data="game:rps")],
+            [InlineKeyboardButton("🧠 Викторина", callback_data="game:quiz")],
+            [InlineKeyboardButton("🛑 Завершить игру", callback_data="game:stop")],
+        ]
+        await message.reply_text(
+            "🎮 **Выбери игру:**\n\n"
+            "• Угадай число — я загадаю, ты угадываешь\n"
+            "• Камень-ножницы-бумага — игра с ботом\n"
+            "• Викторина — ответь на вопрос",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Если пользователь написал /game start — начинаем игру "Угадай число"
+    if args and args[0].lower() == "start":
+        if chat_id in games and games[chat_id]["active"]:
+            await message.reply_text("❌ Игра уже идёт! Используй кнопку 'Завершить игру' или жди окончания.")
+            return
+        
+        number = random.randint(1, 100)
+        games[chat_id] = {
+            "type": "guess",
+            "number": number,
+            "tries": 0,
+            "users": set(),
+            "active": True
+        }
+        await message.reply_text(
+            "🎯 **Игра началась!**\n"
+            "Я загадал число от 1 до 100.\n"
+            "Пиши числа (например, `50`), чтобы угадать!\n"
+            "Используй кнопку 'Завершить игру' чтобы остановить.",
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Если пользователь написал /game stop — завершаем игру
+    if args and args[0].lower() == "stop":
+        if chat_id in games and games[chat_id]["active"]:
+            games[chat_id]["active"] = False
+            await message.reply_text("🛑 Игра завершена!")
+            return
+        else:
+            await message.reply_text("❌ Активной игры нет!")
+            return
+    
+    # Обработка ввода числа для игры "Угадай число"
+    if chat_id in games and games[chat_id]["active"] and games[chat_id]["type"] == "guess":
+        game_data = games[chat_id]
+        
+        try:
+            guess = int(args[0]) if args else None
+        except:
+            guess = None
+        
+        if guess is None:
+            await message.reply_text("📝 Напиши число! Например: `50`", parse_mode="Markdown")
+            return
+        
+        if guess < 1 or guess > 100:
+            await message.reply_text("❌ Число должно быть от 1 до 100!")
+            return
+        
+        game_data["tries"] += 1
+        game_data["users"].add(user_id)
+        
+        if guess == game_data["number"]:
+            try:
+                user = await context.bot.get_chat_member(chat_id, user_id)
+                name = user.user.first_name
+                if user.user.username:
+                    name = f"@{user.user.username}"
+            except:
+                name = "Пользователь"
+            
+            await message.reply_text(
+                f"🎉 **Поздравляю, {name}!**\n"
+                f"Ты угадал число **{game_data['number']}**!\n"
+                f"Попыток: {game_data['tries']}\n"
+                f"Игроков участвовало: {len(game_data['users'])}\n\n"
+                f"Начать новую игру: `/game start`",
+                parse_mode="Markdown"
+            )
+            games[chat_id]["active"] = False
+            return
+        
+        hint = "📈 Больше!" if guess < game_data["number"] else "📉 Меньше!"
+        await message.reply_text(
+            f"❌ Не угадал! **{hint}**\n"
+            f"Попыток: {game_data['tries']}",
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Если игра не активна
+    if chat_id not in games or not games[chat_id]["active"]:
+        await message.reply_text(
+            "❌ Нет активной игры!\n"
+            "Начни новую: `/game start` или выбери в меню",
+            parse_mode="Markdown"
+        )
+
+# ==================== ОБРАБОТЧИК КНОПОК ДЛЯ ИГР ====================
+async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    chat_id = query.message.chat_id
+    user_id = query.from_user.id
+    data = query.data.split(":")[1]
+    
+    if data == "stop":
+        if chat_id in games:
+            games[chat_id]["active"] = False
+            await query.edit_message_text("🛑 Игра завершена!")
+        else:
+            await query.edit_message_text("❌ Активной игры нет!")
+        return
+    
+    if data == "guess":
+        if chat_id in games and games[chat_id]["active"]:
+            await query.edit_message_text("❌ Игра уже идёт! Используй '/game stop' чтобы завершить.")
+            return
+        
+        number = random.randint(1, 100)
+        games[chat_id] = {
+            "type": "guess",
+            "number": number,
+            "tries": 0,
+            "users": set(),
+            "active": True
+        }
+        await query.edit_message_text(
+            "🎯 **Игра началась!**\n"
+            "Я загадал число от 1 до 100.\n"
+            "Пиши числа (например, `50`), чтобы угадать!\n"
+            "Используй кнопку 'Завершить игру' чтобы остановить.",
+            parse_mode="Markdown"
+        )
+        return
+    
+    if data == "rps":
+        # Камень-ножницы-бумага
+        await query.edit_message_text(
+            "✂️ **Камень-ножницы-бумага!**\n\n"
+            "Напиши ответ в сообщении:\n"
+            "• `/rps камень`\n"
+            "• `/rps ножницы`\n"
+            "• `/rps бумага`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    if data == "quiz":
+        # Викторина
+        questions = [
+            {"question": "Сколько планет в Солнечной системе?", "answer": "8"},
+            {"question": "Какой язык программирования самый популярный?", "answer": "python"},
+            {"question": "Столица Франции?", "answer": "париж"},
+            {"question": "Сколько дней в феврале в високосный год?", "answer": "29"},
+            {"question": "Как называется самый большой океан?", "answer": "тихий"},
+        ]
+        q = random.choice(questions)
+        
+        if chat_id not in games or not games[chat_id]["active"]:
+            games[chat_id] = {
+                "type": "quiz",
+                "question": q["question"],
+                "answer": q["answer"],
+                "users": set(),
+                "active": True
+            }
+        else:
+            games[chat_id]["type"] = "quiz"
+            games[chat_id]["question"] = q["question"]
+            games[chat_id]["answer"] = q["answer"]
+            games[chat_id]["users"] = set()
+            games[chat_id]["active"] = True
+        
+        await query.edit_message_text(
+            f"🧠 **Викторина!**\n\n"
+            f"❓ {q['question']}\n\n"
+            f"Напиши ответ в чате (например, `8`).",
+            parse_mode="Markdown"
+        )
+
+# ==================== ОБРАБОТЧИК RPS ====================
+async def rps(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    add_activity(update.effective_chat.id, update.effective_user.id)
+    message = update.message
+    
+    args = context.args
+    if not args:
+        await message.reply_text(
+            "✂️ Напиши: `/rps камень` или `/rps ножницы` или `/rps бумага`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    choice = args[0].lower()
+    if choice not in ["камень", "ножницы", "бумага"]:
+        await message.reply_text("❌ Выбери: камень, ножницы или бумага!")
+        return
+    
+    bot_choice = random.choice(["камень", "ножницы", "бумага"])
+    
+    if choice == bot_choice:
+        result = "🤝 Ничья!"
+    elif (choice == "камень" and bot_choice == "ножницы") or \
+         (choice == "ножницы" and bot_choice == "бумага") or \
+         (choice == "бумага" and bot_choice == "камень"):
+        result = "🎉 Ты выиграл!"
+    else:
+        result = "😅 Бот выиграл!"
+    
+    emojis = {"камень": "🪨", "ножницы": "✂️", "бумага": "📄"}
+    
+    await message.reply_text(
+        f"✂️ **Камень-ножницы-бумага!**\n\n"
+        f"Ты: {emojis[choice]} {choice}\n"
+        f"Бот: {emojis[bot_choice]} {bot_choice}\n\n"
+        f"**{result}**",
+        parse_mode="Markdown"
+    )
+
+# ==================== ТРИГГЕР "БУГУЛЬМА" ====================
+async def handle_bugulma(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message.text:
+        return
+    
+    if "бугульма" in message.text.lower():
+        add_activity(update.effective_chat.id, update.effective_user.id)
+        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id
+        
+        cool, remain = check_cd(chat_id, user_id, 'folk')
+        if cool:
+            m, s = divmod(remain.seconds, 60)
+            await message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
+            return
+        
+        if ALL_STICKERS:
+            await message.reply_sticker(sticker=random.choice(ALL_STICKERS))
+            use_cd(chat_id, user_id, 'folk')
 
 # ==================== КУЛДАУНЫ ====================
 async def cooldown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -841,6 +1218,8 @@ def run_flask():
 # ==================== ЗАПУСК ====================
 def main():
     load_user_groups()
+    load_stats()
+    
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -851,10 +1230,17 @@ def main():
     app.add_handler(CommandHandler("zabava", zabava))
     app.add_handler(CommandHandler("search", search))
     app.add_handler(CommandHandler("voice", voice))
+    app.add_handler(CommandHandler("cat", cat))
+    app.add_handler(CommandHandler("dog", dog))
+    app.add_handler(CommandHandler("top", top))
+    app.add_handler(CommandHandler("game", game))
+    app.add_handler(CommandHandler("rps", rps))
     app.add_handler(CommandHandler("cooldown", cooldown_cmd))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_bugulma))
     app.add_handler(InlineQueryHandler(inline_query))
     app.add_handler(CallbackQueryHandler(cd_button, pattern="^cd:"))
+    app.add_handler(CallbackQueryHandler(game_callback, pattern="^game:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cd_input))
 
     threading.Thread(target=run_flask, daemon=True).start()
