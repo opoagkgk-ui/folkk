@@ -28,7 +28,6 @@ from telegram.ext import (
 from deep_translator import GoogleTranslator
 from gtts import gTTS
 from io import BytesIO
-from groq import Groq
 
 # ==================== ТОКЕН ИЗ ОКРУЖЕНИЯ ====================
 TOKEN = os.environ.get("API_TOKEN")
@@ -43,33 +42,45 @@ UNSPLASH_ACCESS_KEY = "VTNenGnCKKbtcMddc_oN6qg5AGpmEXKUMDHK99qkbiA"
 # ==================== АДМИН ID ====================
 ADMIN_ID = 8371473442  # твой ID
 
-# ==================== GROQ AI ====================
-GROQ_API_KEY = "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"
-groq_client = Groq(api_key=GROQ_API_KEY)
+# ==================== OPENROUTER AI ====================
+OPENROUTER_API_KEY = "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"
 
-def ask_groq(question):
-    """Отправляет запрос к Groq API с системным промптом."""
+def ask_openrouter(question):
+    """Отправляет запрос к OpenRouter с бесплатной моделью."""
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    system_prompt = (
+        "Ты — Folk AI, дружелюбный и остроумный помощник из вселенной Folk Valley. "
+        "Твой стиль общения: лёгкий, с юмором, иногда саркастичный, но всегда доброжелательный. "
+        "Ты отвечаешь кратко и по делу, но с душой. Если пользователь шутит — поддерживаешь шутку. "
+        "Ты знаешь про мемы, стикеры, игры и все функции бота Folk Valley. "
+        "Всегда отвечаешь на русском языке, если вопрос не требует другого языка."
+    )
+    
+    payload = {
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": question}
+        ],
+        "model": "mistralai/mistral-7b-instruct:free",
+        "temperature": 0.7,
+        "max_tokens": 1024,
+    }
+    
     try:
-        system_prompt = (
-            "Ты — Folk AI, дружелюбный и остроумный помощник из вселенной Folk Valley. "
-            "Твой стиль общения: лёгкий, с юмором, иногда саркастичный, но всегда доброжелательный. "
-            "Ты отвечаешь кратко и по делу, но с душой. Если пользователь шутит — поддерживаешь шутку. "
-            "Ты знаешь про мемы, стикеры, игры и все функции бота Folk Valley. "
-            "Всегда отвечаешь на русском языке, если вопрос не требует другого языка."
-        )
-        
-        response = groq_client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": question}
-            ],
-            model="mixtral-8x7b-32768",
-            temperature=0.7,
-            max_tokens=1024,
-        )
-        return response.choices[0].message.content
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        if response.status_code == 200:
+            data = response.json()
+            return data["choices"][0]["message"]["content"]
+        else:
+            logging.error(f"OpenRouter ошибка: {response.status_code} - {response.text}")
+            return None
     except Exception as e:
-        logging.error(f"Ошибка Groq: {e}")
+        logging.error(f"Ошибка OpenRouter: {e}")
         return None
 
 # ==================== СЛОВА ДЛЯ /sosat ====================
@@ -795,7 +806,7 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await message.reply_text("🤔 Думаю...")
     
     try:
-        answer = ask_groq(question)
+        answer = ask_openrouter(question)
         if answer is None:
             await status_msg.edit_text("❌ Ошибка получения ответа от AI. Попробуй позже.")
             return
