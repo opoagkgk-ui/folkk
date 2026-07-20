@@ -565,6 +565,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "👋 Привет! Я бот Folk Valley.\n\n"
             "🎮 **Игры:**\n"
             "• `/game` — выбрать игру (угадай число, КНБ, викторина)\n"
+            "• Для ответа используй `/answer` (только для создателя игры)\n"
             "• `/top` — топ активных пользователей\n\n"
             "🐱 **Животные:**\n"
             "• `/cat` — случайный котик\n"
@@ -577,7 +578,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• `/voice` — озвучить текст\n\n"
             "⚙️ **Управление:**\n"
             "• `/cooldown` — кулдауны (владелец группы)\n\n"
-            "🔄 **Триггер:** напиши «бугульма» — получишь стикер!",
+            "🔄 **Триггеры:**\n"
+            "• Напиши «бугульма», «литвин» или «бред» — получишь стикер!\n"
+            "• Напиши просто «п» — бот ответит «п».",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
@@ -906,7 +909,8 @@ async def game(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🎮 **Выбери игру:**\n\n"
         "• Угадай число — я загадаю, ты угадываешь\n"
         "• Камень-ножницы-бумага — игра с ботом\n"
-        "• Викторина — ответь на вопрос",
+        "• Викторина — ответь на вопрос\n\n"
+        "📝 Для ответа используй: `/answer`",
         reply_markup=InlineKeyboardMarkup(kb),
         parse_mode="Markdown"
     )
@@ -961,16 +965,13 @@ async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             games[chat_id]["data"]["tries"] = 0
             games[chat_id]["data"]["users"] = set()
             
-            # Кнопка для ввода числа
-            kb = [
-                [InlineKeyboardButton("🔢 Написать число", callback_data=f"game_input:guess:{user_id}")],
-                [InlineKeyboardButton("🛑 Завершить игру", callback_data=f"game_stop:{user_id}")],
-            ]
+            kb = [[InlineKeyboardButton("🛑 Завершить игру", callback_data=f"game_stop:{user_id}")]]
             
             await query.edit_message_text(
                 f"🎯 **Игра началась!** (Создатель: @{query.from_user.username or query.from_user.first_name})\n\n"
                 f"Я загадал число от 1 до 100.\n"
-                f"Нажми кнопку «Написать число» и напиши свой вариант!",
+                f"Напиши: `/answer 50` (подставь своё число)\n"
+                f"Чтобы завершить игру — нажми кнопку ниже.",
                 reply_markup=InlineKeyboardMarkup(kb),
                 parse_mode="Markdown"
             )
@@ -1008,56 +1009,16 @@ async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             games[chat_id]["data"]["answer"] = q["answer"].lower()
             games[chat_id]["data"]["answered"] = False
             
-            # Кнопка для ответа
-            kb = [
-                [InlineKeyboardButton("✏️ Написать ответ", callback_data=f"game_input:quiz:{user_id}")],
-                [InlineKeyboardButton("🛑 Завершить игру", callback_data=f"game_stop:{user_id}")],
-            ]
+            kb = [[InlineKeyboardButton("🛑 Завершить игру", callback_data=f"game_stop:{user_id}")]]
             
             await query.edit_message_text(
                 f"🧠 **Викторина!** (Создатель: @{query.from_user.username or query.from_user.first_name})\n\n"
                 f"❓ {q['question']}\n\n"
-                f"Нажми кнопку «Написать ответ» и напиши свой вариант!",
+                f"Напиши: `/answer {q['answer']}` (подставь свой ответ)\n"
+                f"Чтобы завершить игру — нажми кнопку ниже.",
                 reply_markup=InlineKeyboardMarkup(kb),
                 parse_mode="Markdown"
             )
-
-# ==================== ОБРАБОТЧИК ВВОДА ДЛЯ ИГР (универсальный) ====================
-async def game_input_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Разрешает ввод для Угадай числа и Викторины."""
-    query = update.callback_query
-    await query.answer()
-    
-    chat_id = query.message.chat_id
-    user_id = query.from_user.id
-    data_parts = query.data.split(":")
-    game_type = data_parts[1] if len(data_parts) > 1 else None
-    initiator_id = int(data_parts[2]) if len(data_parts) > 2 else None
-    
-    if chat_id not in games or not games[chat_id]["active"]:
-        await query.edit_message_text("❌ Игра уже завершена!")
-        return
-    
-    if games[chat_id]["user_id"] != user_id:
-        await query.edit_message_text("❌ Только создатель игры может отвечать!")
-        return
-    
-    if game_type == "guess":
-        await query.edit_message_text(
-            "🔢 **Напиши число в чате!**\n\n"
-            "Просто отправь число от 1 до 100.\n"
-            "Например: `50`",
-            parse_mode="Markdown"
-        )
-    elif game_type == "quiz":
-        await query.edit_message_text(
-            "✏️ **Напиши свой ответ в чате!**\n\n"
-            "Просто отправь сообщение с ответом.\n"
-            "Например: `8` или `Париж`",
-            parse_mode="Markdown"
-        )
-    else:
-        await query.edit_message_text("❌ Неизвестный тип игры!")
 
 # ==================== ОБРАБОТЧИК RPS ====================
 async def game_rps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1108,106 +1069,172 @@ async def game_rps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# ==================== ОБРАБОТЧИК ВВОДА ДЛЯ ИГР (сообщения в чате) ====================
-async def handle_game_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает ввод чисел для угадайки и ответы на викторину."""
+# ==================== /answer (для ответов в играх) ====================
+async def answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для ответа в игре (Угадай число или Викторина)."""
+    add_activity(update.effective_chat.id, update.effective_user.id)
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
     message = update.message
-    chat_id = message.chat_id
-    user_id = message.from_user.id
     
+    # Проверяем, есть ли активная игра
     if chat_id not in games or not games[chat_id]["active"]:
+        await message.reply_text("❌ Нет активной игры!")
         return
     
     game_data = games[chat_id]
     
-    # Проверяем, что отвечает создатель игры
+    # Проверяем, что команду вводит создатель игры
     if game_data["user_id"] != user_id:
         await message.reply_text("❌ Только создатель игры может отвечать!")
         return
     
-    # Игра "Угадай число"
-    if game_data["type"] == "guess":
-        try:
-            guess = int(message.text.strip())
-        except:
-            await message.reply_text("❌ Напиши число! Например: `50`", parse_mode="Markdown")
-            return
-        
-        if guess < 1 or guess > 100:
-            await message.reply_text("❌ Число должно быть от 1 до 100!")
-            return
-        
-        game_data["data"]["tries"] += 1
-        game_data["data"]["users"].add(user_id)
-        number = game_data["data"]["number"]
-        
-        if guess == number:
-            await message.reply_text(
-                f"🎉 **Поздравляю!**\n"
-                f"Ты угадал число **{number}**!\n"
-                f"Попыток: {game_data['data']['tries']}\n\n"
-                f"🔄 Сыграть ещё раз: `/game`",
-                parse_mode="Markdown"
-            )
-            games[chat_id]["active"] = False
-            return
-        
-        hint = "📈 Больше!" if guess < number else "📉 Меньше!"
+    # Получаем текст ответа
+    answer_text = " ".join(context.args) if context.args else ""
+    if not answer_text:
         await message.reply_text(
-            f"❌ Не угадал! **{hint}**\n"
-            f"Попыток: {game_data['data']['tries']}",
+            "❌ Напиши ответ после команды!\n"
+            "Примеры:\n"
+            "`/answer 50` — для угадайки\n"
+            "`/answer Париж` — для викторины",
             parse_mode="Markdown"
         )
         return
     
-    # Викторина
-    if game_data["type"] == "quiz":
-        if game_data["data"].get("answered", False):
-            await message.reply_text("❌ Ты уже отвечал на этот вопрос! Начни новую игру.")
-            return
-        
-        answer = message.text.strip().lower()
-        correct_answer = game_data["data"]["answer"]
-        
-        if answer == correct_answer:
-            await message.reply_text(
-                f"🎉 **Правильно!**\n"
-                f"Ответ: {correct_answer}\n\n"
-                f"🔄 Сыграть ещё раз: `/game`",
-                parse_mode="Markdown"
-            )
-            games[chat_id]["active"] = False
-        else:
-            game_data["data"]["answered"] = True
-            await message.reply_text(
-                f"❌ **Неправильно!**\n"
-                f"Правильный ответ: {correct_answer}\n\n"
-                f"🔄 Сыграть ещё раз: `/game`",
-                parse_mode="Markdown"
-            )
-            games[chat_id]["active"] = False
-        return
+    # Обрабатываем ответ в зависимости от типа игры
+    if game_data["type"] == "guess":
+        await handle_guess_answer(update, context, game_data, answer_text)
+    elif game_data["type"] == "quiz":
+        await handle_quiz_answer(update, context, game_data, answer_text)
+    else:
+        await message.reply_text("❌ Неизвестный тип игры!")
 
-# ==================== ТРИГГЕР "БУГУЛЬМА" ====================
-async def handle_bugulma(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ==================== ОБРАБОТЧИКИ ОТВЕТОВ ====================
+async def handle_guess_answer(update: Update, context: ContextTypes.DEFAULT_TYPE, game_data, answer_text):
+    """Обрабатывает ответ для игры 'Угадай число'."""
+    message = update.message
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    try:
+        guess = int(answer_text.strip())
+    except:
+        await message.reply_text("❌ Напиши число! Например: `/answer 50`", parse_mode="Markdown")
+        return
+    
+    if guess < 1 or guess > 100:
+        await message.reply_text("❌ Число должно быть от 1 до 100!")
+        return
+    
+    game_data["data"]["tries"] += 1
+    game_data["data"]["users"].add(user_id)
+    number = game_data["data"]["number"]
+    
+    if guess == number:
+        await message.reply_text(
+            f"🎉 **Поздравляю!**\n"
+            f"Ты угадал число **{number}**!\n"
+            f"Попыток: {game_data['data']['tries']}\n\n"
+            f"🔄 Сыграть ещё раз: `/game`",
+            parse_mode="Markdown"
+        )
+        games[chat_id]["active"] = False
+        return
+    
+    hint = "📈 Больше!" if guess < number else "📉 Меньше!"
+    await message.reply_text(
+        f"❌ Не угадал! **{hint}**\n"
+        f"Попыток: {game_data['data']['tries']}",
+        parse_mode="Markdown"
+    )
+
+async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE, game_data, answer_text):
+    """Обрабатывает ответ для викторины."""
+    message = update.message
+    chat_id = update.effective_chat.id
+    
+    if game_data["data"].get("answered", False):
+        await message.reply_text("❌ Ты уже отвечал на этот вопрос! Начни новую игру.")
+        return
+    
+    user_answer = answer_text.strip().lower()
+    correct_answer = game_data["data"]["answer"]
+    
+    if user_answer == correct_answer:
+        await message.reply_text(
+            f"🎉 **Правильно!**\n"
+            f"Ответ: {correct_answer}\n\n"
+            f"🔄 Сыграть ещё раз: `/game`",
+            parse_mode="Markdown"
+        )
+        games[chat_id]["active"] = False
+    else:
+        game_data["data"]["answered"] = True
+        await message.reply_text(
+            f"❌ **Неправильно!**\n"
+            f"Правильный ответ: {correct_answer}\n\n"
+            f"🔄 Сыграть ещё раз: `/game`",
+            parse_mode="Markdown"
+        )
+        games[chat_id]["active"] = False
+
+# ==================== ТРИГГЕРЫ (бугульма, литвин, бред, п) ====================
+async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает текстовые триггеры."""
     message = update.message
     if not message.text:
         return
     
-    if "бугульма" in message.text.lower():
-        add_activity(update.effective_chat.id, update.effective_user.id)
-        chat_id = update.effective_chat.id
-        user_id = update.effective_user.id
-        
+    text = message.text.strip()
+    text_lower = text.lower()
+    
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    # Триггер "бугульма" → /folk
+    if "бугульма" in text_lower:
+        add_activity(chat_id, user_id)
         cool, remain = check_cd(chat_id, user_id, 'folk')
         if cool:
             m, s = divmod(remain.seconds, 60)
             await message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
             return
-        
         if ALL_STICKERS:
             await message.reply_sticker(sticker=random.choice(ALL_STICKERS))
             use_cd(chat_id, user_id, 'folk')
+        return
+    
+    # Триггер "литвин" → /litvin
+    if "литвин" in text_lower:
+        add_activity(chat_id, user_id)
+        cool, remain = check_cd(chat_id, user_id, 'litvin')
+        if cool:
+            m, s = divmod(remain.seconds, 60)
+            await message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
+            return
+        if litvin_stickers:
+            await message.reply_sticker(sticker=random.choice(litvin_stickers))
+            use_cd(chat_id, user_id, 'litvin')
+        return
+    
+    # Триггер "бред" → /bred
+    if "бред" in text_lower:
+        add_activity(chat_id, user_id)
+        cool, remain = check_cd(chat_id, user_id, 'bred')
+        if cool:
+            m, s = divmod(remain.seconds, 60)
+            await message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
+            return
+        if bred_stickers:
+            await message.reply_sticker(sticker=random.choice(bred_stickers))
+            use_cd(chat_id, user_id, 'bred')
+        return
+    
+    # Триггер "п" (только одна буква "п" без ничего)
+    if text == "п" or text == "П" or text == "p" or text == "P":
+        add_activity(chat_id, user_id)
+        await message.reply_text("п")
+        return
 
 # ==================== КУЛДАУНЫ ====================
 async def cooldown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1304,16 +1331,15 @@ def main():
     app.add_handler(CommandHandler("dog", dog))
     app.add_handler(CommandHandler("top", top))
     app.add_handler(CommandHandler("game", game))
+    app.add_handler(CommandHandler("answer", answer))
     app.add_handler(CommandHandler("cooldown", cooldown_cmd))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_bugulma))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_triggers))
     app.add_handler(InlineQueryHandler(inline_query))
     app.add_handler(CallbackQueryHandler(cd_button, pattern="^cd:"))
     app.add_handler(CallbackQueryHandler(game_callback, pattern="^game_start:"))
     app.add_handler(CallbackQueryHandler(game_callback, pattern="^game_stop:"))
     app.add_handler(CallbackQueryHandler(game_rps_callback, pattern="^game_rps:"))
-    app.add_handler(CallbackQueryHandler(game_input_callback, pattern="^game_input:"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_game_input))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cd_input))
 
     threading.Thread(target=run_flask, daemon=True).start()
