@@ -28,7 +28,6 @@ from telegram.ext import (
 from deep_translator import GoogleTranslator
 from gtts import gTTS
 from io import BytesIO
-from pollinations import Pollinations
 
 # ==================== ТОКЕН ИЗ ОКРУЖЕНИЯ ====================
 TOKEN = os.environ.get("API_TOKEN")
@@ -43,8 +42,36 @@ UNSPLASH_ACCESS_KEY = "VTNenGnCKKbtcMddc_oN6qg5AGpmEXKUMDHK99qkbiA"
 # ==================== АДМИН ID ====================
 ADMIN_ID = 8371473442  # твой ID
 
-# ==================== POLLINATIONS AI (Mistral) ====================
-pollinations_client = Pollinations()
+# ==================== AI ФУНКЦИЯ (прямой API Pollinations с системным промптом) ====================
+def ask_pollinations(question):
+    """Отправляет запрос к Pollinations AI через прямой API с системным промптом."""
+    url = "https://text.pollinations.ai/"
+    
+    system_prompt = (
+        "Ты — Folk AI, дружелюбный и остроумный помощник из вселенной Folk Valley. "
+        "Твой стиль общения: лёгкий, с юмором, иногда саркастичный, но всегда доброжелательный. "
+        "Ты отвечаешь кратко и по делу, но с душой. Если пользователь шутит — поддерживаешь шутку. "
+        "Ты знаешь про мемы, стикеры, игры и все функции бота Folk Valley. "
+        "Всегда отвечаешь на русском языке, если вопрос не требует другого языка."
+    )
+    
+    payload = {
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": question}
+        ],
+        "model": "mistral"
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=30)
+        if response.status_code == 200:
+            return response.text.strip()
+        else:
+            logging.error(f"Pollinations ошибка: {response.status_code}")
+            return None
+    except Exception as e:
+        logging.error(f"Ошибка Pollinations: {e}")
+        return None
 
 # ==================== СЛОВА ДЛЯ /sosat ====================
 RANDOM_WORDS = [
@@ -484,7 +511,7 @@ def get_ai_limit(user_id):
     return 2
 
 # ==================== КУЛДАУН ДЛЯ AI ====================
-ai_cooldown = {}  # {user_id: timestamp}
+ai_cooldown = {}
 
 def check_ai_cooldown(user_id):
     if user_id in ai_cooldown:
@@ -748,7 +775,6 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # Проверка лимита
-    today = datetime.now().strftime("%Y-%m-%d")
     used = get_ai_usage_today(user_id)
     limit = get_ai_limit(user_id)
     
@@ -774,12 +800,10 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await message.reply_text("🤔 Думаю...")
     
     try:
-        # Запрос к Pollinations AI (Mistral)
-        response = pollinations_client.chat.completions.create(
-            messages=[{"role": "user", "content": question}],
-            model="mistral"
-        )
-        answer = response.choices[0].message.content
+        answer = ask_pollinations(question)
+        if answer is None:
+            await status_msg.edit_text("❌ Ошибка получения ответа от AI. Попробуй позже.")
+            return
         
         # Сохраняем использованный вопрос
         increment_ai_usage(user_id)
@@ -794,6 +818,51 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         await status_msg.edit_text(f"❌ Ошибка: {e}")
+
+# ==================== ПРЕМИУМ КОМАНДА ====================
+async def premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_chat(update.effective_chat.id)
+    add_activity(update.effective_chat.id, update.effective_user.id)
+    user_id = update.effective_user.id
+    message = update.message
+    
+    if is_premium(user_id):
+        days_left = get_premium_days_left(user_id)
+        await message.reply_text(
+            f"⭐ **У вас есть премиум!**\n\n"
+            f"Осталось дней: **{days_left}**\n\n"
+            f"🔹 Ваши возможности:\n"
+            f"• До 20 вопросов к AI в день\n"
+            f"• Создание кастомных триггеров\n"
+            f"• Приоритетная обработка команд\n\n"
+            f"Спасибо, что с нами! ❤️",
+            parse_mode="Markdown"
+        )
+    else:
+        kb = [
+            [InlineKeyboardButton("💎 Купить премиум (30 дней)", callback_data="premium:buy")],
+        ]
+        await message.reply_text(
+            "⭐ **Премиум-доступ к Folk Valley Bot!**\n\n"
+            "Получи максимум от бота:\n\n"
+            "🔹 **До 20 вопросов к AI в день** (вместо 2)\n"
+            "🔹 **Кастомные триггеры** — создавай свои команды\n"
+            "🔹 **Приоритетная обработка** команд\n\n"
+            "💎 Стоимость: **100 Telegram Stars** за 30 дней\n\n"
+            "Нажми кнопку ниже, чтобы купить!",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode="Markdown"
+        )
+
+async def premium_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "💎 **Покупка премиума через Telegram Stars**\n\n"
+        "К сожалению, оплата через Stars пока не подключена.\n"
+        "Напишите @palo_dev для получения премиума!",
+        parse_mode="Markdown"
+    )
 
 # ==================== КОМАНДЫ ДЛЯ АДМИНА ====================
 async def give_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1721,6 +1790,7 @@ def main():
     
     # Премиум
     app.add_handler(CommandHandler("premium", premium))
+    app.add_handler(CallbackQueryHandler(premium_callback, pattern="^premium:"))
     
     # Админ-команды
     app.add_handler(CommandHandler("give_premium", give_premium))
@@ -1752,4 +1822,4 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    main() 
