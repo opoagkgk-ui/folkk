@@ -9,10 +9,11 @@ import io
 import threading
 import base64
 import aiohttp
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
-from telegram import Update, InlineQueryResultCachedSticker, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram import Update, InlineQueryResultCachedSticker, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, LabeledPrice
 from telegram.constants import ChatMemberStatus
 from telegram.ext import (
     Application,
@@ -22,10 +23,12 @@ from telegram.ext import (
     MessageHandler,
     ContextTypes,
     filters,
+    PreCheckoutQueryHandler,
 )
 from deep_translator import GoogleTranslator
 from gtts import gTTS
 from io import BytesIO
+from pollinations import Pollinations
 
 # ==================== ТОКЕН ИЗ ОКРУЖЕНИЯ ====================
 TOKEN = os.environ.get("API_TOKEN")
@@ -37,6 +40,12 @@ MINI_APP_URL = "https://jalal-p7p9.onrender.com"
 IMGBB_API_KEY = "2bbaa8526b22fc8d7930403e13dbbdcd"
 UNSPLASH_ACCESS_KEY = "VTNenGnCKKbtcMddc_oN6qg5AGpmEXKUMDHK99qkbiA"
 
+# ==================== АДМИН ID ====================
+ADMIN_ID = 8371473442  # твой ID
+
+# ==================== POLLINATIONS AI (Mistral) ====================
+pollinations_client = Pollinations()
+
 # ==================== СЛОВА ДЛЯ /sosat ====================
 RANDOM_WORDS = [
     "кот", "привет", "чайник", "Владимир", "мандарин", "космос", "велосипед",
@@ -46,7 +55,7 @@ RANDOM_WORDS = [
     "огурец", "микрофон", "самокат", "трамвай", "облако", "одуван"
 ]
 
-# ==================== СТИКЕРЫ ====================
+# ==================== СТИКЕРЫ (ПОЛНЫЙ СПИСОК) ====================
 ALL_STICKERS = [
     "CAACAgIAAxUAAWokXU38_MuMDT7hhvRuZctYuCKJAALIoAACX-ToSLg5DDhF1X44OwQ",
     "CAACAgIAAxUAAWokXU3n6LDpd626aZfX7VT1CippAAKapAAC1p_wSAAByejMhUYpHjsE",
@@ -391,53 +400,139 @@ bred_stickers = [
     "CAACAgIAAxUAAWokZOrG40e6MTW66zTsxm4Z-loOAAJOmAACHOB4SE3Urosl5Hw4OwQ",
 ]
 
-# ==================== СЛОВАРИ ДЛЯ КУЛДАУНОВ ====================
-cooldowns_folk = {}
-cooldowns_litvin = {}
-cooldowns_bred = {}
-cooldowns_search = {}
-cooldowns_voice = {}
-chat_cooldowns = {}
-pending_cooldown_input = {}
+# ==================== ФАЙЛЫ ДЛЯ ХРАНЕНИЯ ====================
+PREMIUM_FILE = "premium_users.json"
+AI_USAGE_FILE = "ai_usage.json"
+TRIGGERS_FILE = "custom_triggers.json"
+CHATS_FILE = "all_chats.json"
 
-# ==================== ДЛЯ РЕЙТИНГА ====================
-user_stats = {}
-USER_STATS_FILE = "user_stats.json"
+# ==================== ПРЕМИУМ-СИСТЕМА ====================
+premium_users = {}
 
-# ==================== ДЛЯ ИГР ====================
-games = {}  # {chat_id: {"user_id": int, "type": str, "data": dict, "active": bool}}
-
-USER_GROUPS_FILE = "user_groups.json"
-user_groups = {}
-
-logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
-
-# ==================== ФУНКЦИИ ДЛЯ РЕЙТИНГА ====================
-def load_stats():
-    global user_stats
-    if os.path.exists(USER_STATS_FILE):
+def load_premium():
+    global premium_users
+    if os.path.exists(PREMIUM_FILE):
         try:
-            with open(USER_STATS_FILE, 'r', encoding='utf-8') as f:
-                user_stats = json.load(f)
-                user_stats = {int(k): {int(uid): count for uid, count in v.items()} 
-                              for k, v in user_stats.items()}
+            with open(PREMIUM_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                premium_users = {int(k): v for k, v in data.items()}
         except:
-            user_stats = {}
+            premium_users = {}
+    # Автоматически добавляем админа в премиум навсегда
+    if ADMIN_ID not in premium_users or premium_users[ADMIN_ID] < time.time():
+        premium_users[ADMIN_ID] = time.time() + 365 * 24 * 60 * 60
+        save_premium()
 
-def save_stats():
+def save_premium():
     try:
-        with open(USER_STATS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(user_stats, f, ensure_ascii=False, indent=2)
+        with open(PREMIUM_FILE, 'w', encoding='utf-8') as f:
+            json.dump(premium_users, f, ensure_ascii=False, indent=2)
     except:
         pass
 
-def add_activity(chat_id, user_id):
-    chat_id = int(chat_id)
-    user_id = int(user_id)
-    if chat_id not in user_stats:
-        user_stats[chat_id] = {}
-    user_stats[chat_id][user_id] = user_stats[chat_id].get(user_id, 0) + 1
-    save_stats()
+def is_premium(user_id):
+    if user_id not in premium_users:
+        return False
+    return premium_users[user_id] > time.time()
+
+def add_premium(user_id, days=30):
+    expire_time = int(time.time()) + days * 24 * 60 * 60
+    premium_users[user_id] = expire_time
+    save_premium()
+
+def get_premium_days_left(user_id):
+    if user_id not in premium_users:
+        return 0
+    remaining = premium_users[user_id] - time.time()
+    if remaining < 0:
+        return 0
+    return int(remaining / 86400)
+
+# ==================== AI ЛИМИТЫ ====================
+ai_usage = {}
+
+def load_ai_usage():
+    global ai_usage
+    if os.path.exists(AI_USAGE_FILE):
+        try:
+            with open(AI_USAGE_FILE, 'r', encoding='utf-8') as f:
+                ai_usage = json.load(f)
+        except:
+            ai_usage = {}
+
+def save_ai_usage():
+    try:
+        with open(AI_USAGE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(ai_usage, f, ensure_ascii=False, indent=2)
+    except:
+        pass
+
+def get_ai_usage_today(user_id):
+    today = datetime.now().strftime("%Y-%m-%d")
+    key = f"{user_id}_{today}"
+    return ai_usage.get(key, 0)
+
+def increment_ai_usage(user_id):
+    today = datetime.now().strftime("%Y-%m-%d")
+    key = f"{user_id}_{today}"
+    ai_usage[key] = ai_usage.get(key, 0) + 1
+    save_ai_usage()
+
+def get_ai_limit(user_id):
+    if is_premium(user_id):
+        return 20
+    return 2
+
+# ==================== КУЛДАУН ДЛЯ AI ====================
+ai_cooldown = {}  # {user_id: timestamp}
+
+def check_ai_cooldown(user_id):
+    if user_id in ai_cooldown:
+        if time.time() - ai_cooldown[user_id] < 60:
+            return True, 60 - int(time.time() - ai_cooldown[user_id])
+    return False, 0
+
+def set_ai_cooldown(user_id):
+    ai_cooldown[user_id] = time.time()
+
+# ==================== ЧАТЫ (для рассылки) ====================
+def load_chats():
+    if os.path.exists(CHATS_FILE):
+        try:
+            with open(CHATS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return []
+    return []
+
+def save_chat(chat_id):
+    chats = load_chats()
+    if chat_id not in chats:
+        chats.append(chat_id)
+        with open(CHATS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(chats, f, ensure_ascii=False, indent=2)
+
+def get_all_chats():
+    return load_chats()
+
+# ==================== КАСТОМНЫЕ ТРИГГЕРЫ ====================
+custom_triggers = {}
+
+def load_triggers():
+    global custom_triggers
+    if os.path.exists(TRIGGERS_FILE):
+        try:
+            with open(TRIGGERS_FILE, 'r', encoding='utf-8') as f:
+                custom_triggers = json.load(f)
+        except:
+            custom_triggers = {}
+
+def save_triggers():
+    try:
+        with open(TRIGGERS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(custom_triggers, f, ensure_ascii=False, indent=2)
+    except:
+        pass
 
 # ==================== ЗАГРУЗКА НА IMGBB ====================
 def upload_to_imgbb(image_bytes):
@@ -470,6 +565,54 @@ def translate_text(text, target_lang='en'):
     except Exception as e:
         logging.error(f"Ошибка перевода: {e}")
         return text
+
+# ==================== СЛОВАРИ ДЛЯ КУЛДАУНОВ ====================
+cooldowns_folk = {}
+cooldowns_litvin = {}
+cooldowns_bred = {}
+cooldowns_search = {}
+cooldowns_voice = {}
+chat_cooldowns = {}
+pending_cooldown_input = {}
+
+# ==================== ДЛЯ РЕЙТИНГА ====================
+user_stats = {}
+USER_STATS_FILE = "user_stats.json"
+
+# ==================== ДЛЯ ИГР ====================
+games = {}
+
+USER_GROUPS_FILE = "user_groups.json"
+user_groups = {}
+
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
+
+# ==================== ФУНКЦИИ ДЛЯ РЕЙТИНГА ====================
+def load_stats():
+    global user_stats
+    if os.path.exists(USER_STATS_FILE):
+        try:
+            with open(USER_STATS_FILE, 'r', encoding='utf-8') as f:
+                user_stats = json.load(f)
+                user_stats = {int(k): {int(uid): count for uid, count in v.items()} 
+                              for k, v in user_stats.items()}
+        except:
+            user_stats = {}
+
+def save_stats():
+    try:
+        with open(USER_STATS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(user_stats, f, ensure_ascii=False, indent=2)
+    except:
+        pass
+
+def add_activity(chat_id, user_id):
+    chat_id = int(chat_id)
+    user_id = int(user_id)
+    if chat_id not in user_stats:
+        user_stats[chat_id] = {}
+    user_stats[chat_id][user_id] = user_stats[chat_id].get(user_id, 0) + 1
+    save_stats()
 
 # ==================== ФУНКЦИИ КУЛДАУНОВ ====================
 def load_user_groups():
@@ -547,6 +690,7 @@ async def search_unsplash(query, per_page=10):
 
 # ==================== ПРИВЕТСТВИЕ НОВЫХ УЧАСТНИКОВ ====================
 async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     for member in update.message.new_chat_members:
         if member.id == context.bot.id:
@@ -558,14 +702,16 @@ async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ==================== КОМАНДЫ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     if update.effective_chat.type == "private":
         keyboard = [[InlineKeyboardButton("👤 Профиль", web_app=WebAppInfo(url=MINI_APP_URL))]]
         await update.message.reply_text(
             "👋 Привет! Я бот Folk Valley.\n\n"
+            "🤖 **AI-чат:**\n"
+            "• `/ask` — задай любой вопрос (2/день, премиум 20/день)\n\n"
             "🎮 **Игры:**\n"
-            "• `/game` — выбрать игру (угадай число, КНБ, викторина)\n"
-            "• Для ответа используй `/answer` (только для создателя игры)\n"
+            "• `/game` — выбрать игру\n"
             "• `/top` — топ активных пользователей\n\n"
             "🐱 **Животные:**\n"
             "• `/cat` — случайный котик\n"
@@ -573,21 +719,279 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🎭 **Развлечения:**\n"
             "• `/folk`, `/litvin`, `/bred` — стикеры\n"
             "• `/sosat` — бессвязный бред\n"
-            "• `/zabava` — мем из фото + текст (1 верх, 2 низ)\n"
-            "• `/search` — поиск картинок (1 в группе, 3 в лс)\n"
+            "• `/zabava` — мем из фото + текст\n"
+            "• `/search` — поиск картинок\n"
             "• `/voice` — озвучить текст\n\n"
-            "⚙️ **Управление:**\n"
-            "• `/cooldown` — кулдауны (владелец группы)\n\n"
+            "⭐ **Премиум:** `/premium` — купить или проверить статус\n\n"
             "🔄 **Триггеры:**\n"
             "• Напиши «бугульма», «литвин» или «бред» — получишь стикер!\n"
-            "• Напиши просто «п» — бот ответит «п».",
+            "• Напиши просто «п» — бот ответит «п».\n"
+            "• Премиум-пользователи могут создавать свои триггеры: `/set_trigger слово ответ`\n\n"
+            "⚙️ **Управление:**\n"
+            "• `/cooldown` — кулдауны (владелец группы)",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
     else:
         await update.message.reply_text("Я в группе! /folk /litvin /bred /sosat /zabava /search /voice /game /top /cat /dog /cooldown")
 
+async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_chat(update.effective_chat.id)
+    add_activity(update.effective_chat.id, update.effective_user.id)
+    user_id = update.effective_user.id
+    message = update.message
+    
+    # Проверка кулдауна
+    cooldown, remaining = check_ai_cooldown(user_id)
+    if cooldown:
+        await message.reply_text(f"⏳ Подожди {remaining} секунд перед следующим вопросом!")
+        return
+    
+    # Проверка лимита
+    today = datetime.now().strftime("%Y-%m-%d")
+    used = get_ai_usage_today(user_id)
+    limit = get_ai_limit(user_id)
+    
+    if used >= limit:
+        await message.reply_text(
+            f"⏳ Ты использовал все вопросы на сегодня!\n"
+            f"Лимит: {limit} вопросов/день\n"
+            f"Завтра будет новый лимит.\n"
+            f"Или купи премиум: /premium"
+        )
+        return
+    
+    # Получаем вопрос
+    question = " ".join(context.args) if context.args else ""
+    if not question:
+        await message.reply_text(
+            "❌ Напиши вопрос после команды!\n"
+            "Пример: `/ask Как приготовить пиццу?`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    status_msg = await message.reply_text("🤔 Думаю...")
+    
+    try:
+        # Запрос к Pollinations AI (Mistral)
+        response = pollinations_client.chat.completions.create(
+            messages=[{"role": "user", "content": question}],
+            model="mistral"
+        )
+        answer = response.choices[0].message.content
+        
+        # Сохраняем использованный вопрос
+        increment_ai_usage(user_id)
+        set_ai_cooldown(user_id)
+        
+        remaining = limit - used - 1
+        
+        await status_msg.edit_text(
+            f"🤖 **Ответ:**\n\n{answer}\n\n"
+            f"💡 Осталось вопросов: {remaining}",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Ошибка: {e}")
+
+# ==================== КОМАНДЫ ДЛЯ АДМИНА ====================
+async def give_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ Только для администратора!")
+        return
+    
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Укажи ID пользователя!\n"
+            "Пример: `/give_premium 123456789`\n"
+            "Или с количеством дней: `/give_premium 123456789 7`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    try:
+        target_id = int(context.args[0])
+        days = 30
+        if len(context.args) > 1:
+            days = int(context.args[1])
+        
+        add_premium(target_id, days)
+        await update.message.reply_text(
+            f"✅ Пользователю `{target_id}` выдан премиум на {days} дней!",
+            parse_mode="Markdown"
+        )
+    except ValueError:
+        await update.message.reply_text("❌ Неверный формат ID!")
+
+async def chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ Только для администратора!")
+        return
+    
+    chats = get_all_chats()
+    if not chats:
+        await update.message.reply_text("📭 Нет сохранённых чатов.")
+        return
+    
+    private = []
+    groups = []
+    
+    for chat_id in chats:
+        try:
+            chat = await context.bot.get_chat(chat_id)
+            if chat.type == "private":
+                name = chat.first_name or "пользователь"
+                private.append((chat_id, name))
+            else:
+                name = chat.title or "группа"
+                groups.append((chat_id, name))
+        except:
+            groups.append((chat_id, f"ID: {chat_id}"))
+    
+    text = f"📊 **Всего чатов: {len(chats)}**\n\n"
+    
+    if private:
+        text += f"👤 **Личные ({len(private)}):**\n"
+        for chat_id, name in private[:20]:
+            text += f"• `{chat_id}` — {name}\n"
+        if len(private) > 20:
+            text += f"… и ещё {len(private) - 20} личных\n"
+        text += "\n"
+    
+    if groups:
+        text += f"👥 **Группы ({len(groups)}):**\n"
+        for chat_id, name in groups[:20]:
+            text += f"• `{chat_id}` — {name}\n"
+        if len(groups) > 20:
+            text += f"… и ещё {len(groups) - 20} групп\n"
+    
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ Только для администратора!")
+        return
+    
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Напиши текст для рассылки!\n"
+            "Пример: `/broadcast Привет всем!`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    message_text = " ".join(context.args)
+    chats = get_all_chats()
+    
+    if not chats:
+        await update.message.reply_text("📭 Нет сохранённых чатов.")
+        return
+    
+    status_msg = await update.message.reply_text(f"🚀 Начинаю рассылку в {len(chats)} чатов...")
+    
+    sent = 0
+    failed = 0
+    
+    for idx, chat_id in enumerate(chats, 1):
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=message_text)
+            sent += 1
+        except:
+            failed += 1
+        
+        if idx % 30 == 0:
+            await asyncio.sleep(1)
+        else:
+            await asyncio.sleep(0.1)
+    
+    await status_msg.edit_text(
+        f"✅ **Рассылка завершена!**\n"
+        f"📤 Отправлено: {sent}\n"
+        f"❌ Ошибок: {failed}\n"
+        f"📊 Всего чатов: {len(chats)}",
+        parse_mode="Markdown"
+    )
+
+# ==================== КАСТОМНЫЕ ТРИГГЕРЫ ====================
+async def set_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    save_chat(update.effective_chat.id)
+    add_activity(update.effective_chat.id, user_id)
+    
+    if not is_premium(user_id):
+        await update.message.reply_text(
+            "⭐ Создание кастомных триггеров доступно только премиум-пользователям!\n"
+            "Купи премиум: /premium"
+        )
+        return
+    
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "❌ Использование: `/set_trigger слово текст_ответа`\n"
+            "Пример: `/set_trigger привет И тебе привет!`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    trigger_word = context.args[0].lower()
+    response_text = " ".join(context.args[1:])
+    
+    key = f"{user_id}_{trigger_word}"
+    custom_triggers[key] = response_text
+    save_triggers()
+    
+    await update.message.reply_text(f"✅ Триггер «{trigger_word}» сохранён!")
+
+async def remove_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    save_chat(update.effective_chat.id)
+    add_activity(update.effective_chat.id, user_id)
+    
+    if not is_premium(user_id):
+        await update.message.reply_text("⭐ Только для премиум-пользователей!")
+        return
+    
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Использование: `/remove_trigger слово`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    trigger_word = context.args[0].lower()
+    key = f"{user_id}_{trigger_word}"
+    
+    if key in custom_triggers:
+        del custom_triggers[key]
+        save_triggers()
+        await update.message.reply_text(f"✅ Триггер «{trigger_word}» удалён!")
+    else:
+        await update.message.reply_text(f"❌ Триггер «{trigger_word}» не найден!")
+
+async def my_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    save_chat(update.effective_chat.id)
+    add_activity(update.effective_chat.id, user_id)
+    
+    user_triggers = {k.split("_")[1]: v for k, v in custom_triggers.items() if k.startswith(f"{user_id}_")}
+    
+    if not user_triggers:
+        await update.message.reply_text("📭 У тебя нет сохранённых триггеров.")
+        return
+    
+    text = "📋 **Твои триггеры:**\n\n"
+    for word, response in user_triggers.items():
+        text += f"• `{word}` → {response}\n"
+    
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+# ==================== СТАРЫЕ КОМАНДЫ (стикеры, мемы, поиск, игры) ====================
 async def folk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     chat_id, user_id = update.effective_chat.id, update.effective_user.id
     cool, remain = check_cd(chat_id, user_id, 'folk')
@@ -595,13 +999,11 @@ async def folk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         m, s = divmod(remain.seconds, 60)
         await update.message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
         return
-    if not ALL_STICKERS:
-        await update.message.reply_text("Стикеры не загружены.")
-        return
     await update.message.reply_sticker(sticker=random.choice(ALL_STICKERS))
     use_cd(chat_id, user_id, 'folk')
 
 async def litvin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     chat_id, user_id = update.effective_chat.id, update.effective_user.id
     cool, remain = check_cd(chat_id, user_id, 'litvin')
@@ -609,13 +1011,11 @@ async def litvin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         m, s = divmod(remain.seconds, 60)
         await update.message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
         return
-    if not litvin_stickers:
-        await update.message.reply_text("Стикеры не загружены.")
-        return
     await update.message.reply_sticker(sticker=random.choice(litvin_stickers))
     use_cd(chat_id, user_id, 'litvin')
 
 async def bred(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     chat_id, user_id = update.effective_chat.id, update.effective_user.id
     cool, remain = check_cd(chat_id, user_id, 'bred')
@@ -623,19 +1023,18 @@ async def bred(update: Update, context: ContextTypes.DEFAULT_TYPE):
         m, s = divmod(remain.seconds, 60)
         await update.message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
         return
-    if not bred_stickers:
-        await update.message.reply_text("Стикеры не загружены.")
-        return
     await update.message.reply_sticker(sticker=random.choice(bred_stickers))
     use_cd(chat_id, user_id, 'bred')
 
 async def sosat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     words = random.choices(RANDOM_WORDS, k=random.randint(3, 6))
     await update.message.reply_text(" ".join(words))
 
 # ==================== /zabava ====================
 async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     message = update.message
     if not message.photo and not (message.reply_to_message and message.reply_to_message.photo):
@@ -729,6 +1128,7 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== /search ====================
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
@@ -792,6 +1192,7 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== /voice ====================
 async def voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
@@ -820,6 +1221,7 @@ async def voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== /cat ====================
 async def cat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     url = "https://api.thecatapi.com/v1/images/search"
     try:
@@ -835,6 +1237,7 @@ async def cat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== /dog ====================
 async def dog(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     url = "https://api.thedogapi.com/v1/images/search"
     try:
@@ -850,6 +1253,7 @@ async def dog(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== /top ====================
 async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     chat_id = update.effective_chat.id
     chat_type = update.effective_chat.type
@@ -884,12 +1288,12 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== /game ====================
 async def game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     message = update.message
     
-    # Проверяем, есть ли активная игра в этом чате
     if chat_id in games and games[chat_id]["active"]:
         await message.reply_text(
             f"❌ Игра уже идёт! Её запустил пользователь.\n"
@@ -898,7 +1302,6 @@ async def game(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Кнопки выбора игры
     kb = [
         [InlineKeyboardButton("🎯 Угадай число", callback_data=f"game_start:guess:{user_id}")],
         [InlineKeyboardButton("✂️ Камень-ножницы-бумага", callback_data=f"game_start:rps:{user_id}")],
@@ -915,7 +1318,6 @@ async def game(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# ==================== ОБРАБОТЧИК КНОПОК ИГР ====================
 async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -923,11 +1325,10 @@ async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat_id
     user_id = query.from_user.id
     data_parts = query.data.split(":")
-    action = data_parts[0]  # game_start или game_stop
+    action = data_parts[0]
     game_type = data_parts[1] if len(data_parts) > 1 else None
     initiator_id = int(data_parts[2]) if len(data_parts) > 2 else None
     
-    # Остановка игры
     if action == "game_stop":
         if chat_id in games and games[chat_id]["active"]:
             if games[chat_id]["user_id"] != user_id:
@@ -939,19 +1340,15 @@ async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Активной игры нет!")
         return
     
-    # Запуск игры
     if action == "game_start":
-        # Проверяем, не идёт ли уже игра
         if chat_id in games and games[chat_id]["active"]:
             await query.edit_message_text("❌ Игра уже идёт в этом чате!")
             return
         
-        # Проверяем, что нажал тот же пользователь, который запускал (из callback_data)
         if initiator_id != user_id:
             await query.edit_message_text("❌ Только создатель игры может её запустить!")
             return
         
-        # Запускаем игру
         games[chat_id] = {
             "user_id": user_id,
             "type": game_type,
@@ -979,7 +1376,6 @@ async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif game_type == "rps":
             games[chat_id]["data"]["winner"] = None
             
-            # Кнопки для выбора
             kb = [
                 [InlineKeyboardButton("🪨 Камень", callback_data=f"game_rps:камень:{user_id}")],
                 [InlineKeyboardButton("✂️ Ножницы", callback_data=f"game_rps:ножницы:{user_id}")],
@@ -1020,7 +1416,6 @@ async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
 
-# ==================== ОБРАБОТЧИК RPS ====================
 async def game_rps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1056,7 +1451,6 @@ async def game_rps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     emojis = {"камень": "🪨", "ножницы": "✂️", "бумага": "📄"}
     
-    # Кнопка для новой игры
     kb = [[InlineKeyboardButton("🔄 Сыграть ещё раз", callback_data=f"game_start:rps:{user_id}")],
           [InlineKeyboardButton("🛑 Завершить игру", callback_data=f"game_stop:{user_id}")]]
     
@@ -1069,27 +1463,23 @@ async def game_rps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# ==================== /answer (для ответов в играх) ====================
 async def answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для ответа в игре (Угадай число или Викторина)."""
+    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     message = update.message
     
-    # Проверяем, есть ли активная игра
     if chat_id not in games or not games[chat_id]["active"]:
         await message.reply_text("❌ Нет активной игры!")
         return
     
     game_data = games[chat_id]
     
-    # Проверяем, что команду вводит создатель игры
     if game_data["user_id"] != user_id:
         await message.reply_text("❌ Только создатель игры может отвечать!")
         return
     
-    # Получаем текст ответа
     answer_text = " ".join(context.args) if context.args else ""
     if not answer_text:
         await message.reply_text(
@@ -1101,86 +1491,68 @@ async def answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Обрабатываем ответ в зависимости от типа игры
     if game_data["type"] == "guess":
-        await handle_guess_answer(update, context, game_data, answer_text)
+        try:
+            guess = int(answer_text.strip())
+        except:
+            await message.reply_text("❌ Напиши число! Например: `/answer 50`", parse_mode="Markdown")
+            return
+        
+        if guess < 1 or guess > 100:
+            await message.reply_text("❌ Число должно быть от 1 до 100!")
+            return
+        
+        game_data["data"]["tries"] += 1
+        game_data["data"]["users"].add(user_id)
+        number = game_data["data"]["number"]
+        
+        if guess == number:
+            await message.reply_text(
+                f"🎉 **Поздравляю!**\n"
+                f"Ты угадал число **{number}**!\n"
+                f"Попыток: {game_data['data']['tries']}\n\n"
+                f"🔄 Сыграть ещё раз: `/game`",
+                parse_mode="Markdown"
+            )
+            games[chat_id]["active"] = False
+            return
+        
+        hint = "📈 Больше!" if guess < number else "📉 Меньше!"
+        await message.reply_text(
+            f"❌ Не угадал! **{hint}**\n"
+            f"Попыток: {game_data['data']['tries']}",
+            parse_mode="Markdown"
+        )
+    
     elif game_data["type"] == "quiz":
-        await handle_quiz_answer(update, context, game_data, answer_text)
-    else:
-        await message.reply_text("❌ Неизвестный тип игры!")
+        if game_data["data"].get("answered", False):
+            await message.reply_text("❌ Ты уже отвечал на этот вопрос! Начни новую игру.")
+            return
+        
+        user_answer = answer_text.strip().lower()
+        correct_answer = game_data["data"]["answer"]
+        
+        if user_answer == correct_answer:
+            await message.reply_text(
+                f"🎉 **Правильно!**\n"
+                f"Ответ: {correct_answer}\n\n"
+                f"🔄 Сыграть ещё раз: `/game`",
+                parse_mode="Markdown"
+            )
+            games[chat_id]["active"] = False
+        else:
+            game_data["data"]["answered"] = True
+            await message.reply_text(
+                f"❌ **Неправильно!**\n"
+                f"Правильный ответ: {correct_answer}\n\n"
+                f"🔄 Сыграть ещё раз: `/game`",
+                parse_mode="Markdown"
+            )
+            games[chat_id]["active"] = False
 
-# ==================== ОБРАБОТЧИКИ ОТВЕТОВ ====================
-async def handle_guess_answer(update: Update, context: ContextTypes.DEFAULT_TYPE, game_data, answer_text):
-    """Обрабатывает ответ для игры 'Угадай число'."""
-    message = update.message
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    
-    try:
-        guess = int(answer_text.strip())
-    except:
-        await message.reply_text("❌ Напиши число! Например: `/answer 50`", parse_mode="Markdown")
-        return
-    
-    if guess < 1 or guess > 100:
-        await message.reply_text("❌ Число должно быть от 1 до 100!")
-        return
-    
-    game_data["data"]["tries"] += 1
-    game_data["data"]["users"].add(user_id)
-    number = game_data["data"]["number"]
-    
-    if guess == number:
-        await message.reply_text(
-            f"🎉 **Поздравляю!**\n"
-            f"Ты угадал число **{number}**!\n"
-            f"Попыток: {game_data['data']['tries']}\n\n"
-            f"🔄 Сыграть ещё раз: `/game`",
-            parse_mode="Markdown"
-        )
-        games[chat_id]["active"] = False
-        return
-    
-    hint = "📈 Больше!" if guess < number else "📉 Меньше!"
-    await message.reply_text(
-        f"❌ Не угадал! **{hint}**\n"
-        f"Попыток: {game_data['data']['tries']}",
-        parse_mode="Markdown"
-    )
-
-async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE, game_data, answer_text):
-    """Обрабатывает ответ для викторины."""
-    message = update.message
-    chat_id = update.effective_chat.id
-    
-    if game_data["data"].get("answered", False):
-        await message.reply_text("❌ Ты уже отвечал на этот вопрос! Начни новую игру.")
-        return
-    
-    user_answer = answer_text.strip().lower()
-    correct_answer = game_data["data"]["answer"]
-    
-    if user_answer == correct_answer:
-        await message.reply_text(
-            f"🎉 **Правильно!**\n"
-            f"Ответ: {correct_answer}\n\n"
-            f"🔄 Сыграть ещё раз: `/game`",
-            parse_mode="Markdown"
-        )
-        games[chat_id]["active"] = False
-    else:
-        game_data["data"]["answered"] = True
-        await message.reply_text(
-            f"❌ **Неправильно!**\n"
-            f"Правильный ответ: {correct_answer}\n\n"
-            f"🔄 Сыграть ещё раз: `/game`",
-            parse_mode="Markdown"
-        )
-        games[chat_id]["active"] = False
-
-# ==================== ТРИГГЕРЫ (бугульма, литвин, бред, п) ====================
+# ==================== ТРИГГЕРЫ (бугульма, литвин, бред, п, кастомные) ====================
 async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает текстовые триггеры."""
+    save_chat(update.effective_chat.id)
     message = update.message
     if not message.text:
         return
@@ -1191,6 +1563,13 @@ async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     
+    # Кастомные триггеры (только для создателя)
+    user_triggers = {k.split("_")[1]: v for k, v in custom_triggers.items() if k.startswith(f"{user_id}_")}
+    if text_lower in user_triggers:
+        add_activity(chat_id, user_id)
+        await message.reply_text(user_triggers[text_lower])
+        return
+    
     # Триггер "бугульма" → /folk
     if "бугульма" in text_lower:
         add_activity(chat_id, user_id)
@@ -1199,9 +1578,8 @@ async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
             m, s = divmod(remain.seconds, 60)
             await message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
             return
-        if ALL_STICKERS:
-            await message.reply_sticker(sticker=random.choice(ALL_STICKERS))
-            use_cd(chat_id, user_id, 'folk')
+        await message.reply_sticker(sticker=random.choice(ALL_STICKERS))
+        use_cd(chat_id, user_id, 'folk')
         return
     
     # Триггер "литвин" → /litvin
@@ -1212,9 +1590,8 @@ async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
             m, s = divmod(remain.seconds, 60)
             await message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
             return
-        if litvin_stickers:
-            await message.reply_sticker(sticker=random.choice(litvin_stickers))
-            use_cd(chat_id, user_id, 'litvin')
+        await message.reply_sticker(sticker=random.choice(litvin_stickers))
+        use_cd(chat_id, user_id, 'litvin')
         return
     
     # Триггер "бред" → /bred
@@ -1225,12 +1602,11 @@ async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
             m, s = divmod(remain.seconds, 60)
             await message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
             return
-        if bred_stickers:
-            await message.reply_sticker(sticker=random.choice(bred_stickers))
-            use_cd(chat_id, user_id, 'bred')
+        await message.reply_sticker(sticker=random.choice(bred_stickers))
+        use_cd(chat_id, user_id, 'bred')
         return
     
-    # Триггер "п" (только одна буква "п" без ничего)
+    # Триггер "п" (только одна буква)
     if text == "п" or text == "П" or text == "p" or text == "P":
         add_activity(chat_id, user_id)
         await message.reply_text("п")
@@ -1238,6 +1614,7 @@ async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== КУЛДАУНЫ ====================
 async def cooldown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_chat(update.effective_chat.id)
     chat, user = update.effective_chat, update.effective_user
     if chat.type not in ("group", "supergroup"):
         return
@@ -1316,9 +1693,13 @@ def run_flask():
 def main():
     load_user_groups()
     load_stats()
+    load_premium()
+    load_ai_usage()
+    load_triggers()
     
     app = Application.builder().token(TOKEN).build()
 
+    # Основные команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("folk", folk))
     app.add_handler(CommandHandler("litvin", litvin))
@@ -1330,12 +1711,36 @@ def main():
     app.add_handler(CommandHandler("cat", cat))
     app.add_handler(CommandHandler("dog", dog))
     app.add_handler(CommandHandler("top", top))
+    
+    # Игры
     app.add_handler(CommandHandler("game", game))
     app.add_handler(CommandHandler("answer", answer))
+    
+    # AI
+    app.add_handler(CommandHandler("ask", ask))
+    
+    # Премиум
+    app.add_handler(CommandHandler("premium", premium))
+    
+    # Админ-команды
+    app.add_handler(CommandHandler("give_premium", give_premium))
+    app.add_handler(CommandHandler("chats", chats))
+    app.add_handler(CommandHandler("broadcast", broadcast))
+    
+    # Кастомные триггеры
+    app.add_handler(CommandHandler("set_trigger", set_trigger))
+    app.add_handler(CommandHandler("remove_trigger", remove_trigger))
+    app.add_handler(CommandHandler("my_triggers", my_triggers))
+    
+    # Кулдауны
     app.add_handler(CommandHandler("cooldown", cooldown_cmd))
+    
+    # Обработчики
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_triggers))
     app.add_handler(InlineQueryHandler(inline_query))
+    
+    # Callback-обработчики
     app.add_handler(CallbackQueryHandler(cd_button, pattern="^cd:"))
     app.add_handler(CallbackQueryHandler(game_callback, pattern="^game_start:"))
     app.add_handler(CallbackQueryHandler(game_callback, pattern="^game_stop:"))
