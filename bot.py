@@ -28,6 +28,7 @@ from telegram.ext import (
 from deep_translator import GoogleTranslator
 from gtts import gTTS
 from io import BytesIO
+from groq import Groq
 
 # ==================== ТОКЕН ИЗ ОКРУЖЕНИЯ ====================
 TOKEN = os.environ.get("API_TOKEN")
@@ -42,35 +43,33 @@ UNSPLASH_ACCESS_KEY = "VTNenGnCKKbtcMddc_oN6qg5AGpmEXKUMDHK99qkbiA"
 # ==================== АДМИН ID ====================
 ADMIN_ID = 8371473442  # твой ID
 
-# ==================== AI ФУНКЦИЯ (прямой API Pollinations с системным промптом) ====================
-def ask_pollinations(question):
-    """Отправляет запрос к Pollinations AI через прямой API с системным промптом."""
-    url = "https://text.pollinations.ai/"
-    
-    system_prompt = (
-        "Ты — Folk AI, дружелюбный и остроумный помощник из вселенной Folk Valley. "
-        "Твой стиль общения: лёгкий, с юмором, иногда саркастичный, но всегда доброжелательный. "
-        "Ты отвечаешь кратко и по делу, но с душой. Если пользователь шутит — поддерживаешь шутку. "
-        "Ты знаешь про мемы, стикеры, игры и все функции бота Folk Valley. "
-        "Всегда отвечаешь на русском языке, если вопрос не требует другого языка."
-    )
-    
-    payload = {
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question}
-        ],
-        "model": "mistral"
-    }
+# ==================== GROQ AI ====================
+GROQ_API_KEY = "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"
+groq_client = Groq(api_key=GROQ_API_KEY)
+
+def ask_groq(question):
+    """Отправляет запрос к Groq API с системным промптом."""
     try:
-        response = requests.post(url, json=payload, timeout=30)
-        if response.status_code == 200:
-            return response.text.strip()
-        else:
-            logging.error(f"Pollinations ошибка: {response.status_code}")
-            return None
+        system_prompt = (
+            "Ты — Folk AI, дружелюбный и остроумный помощник из вселенной Folk Valley. "
+            "Твой стиль общения: лёгкий, с юмором, иногда саркастичный, но всегда доброжелательный. "
+            "Ты отвечаешь кратко и по делу, но с душой. Если пользователь шутит — поддерживаешь шутку. "
+            "Ты знаешь про мемы, стикеры, игры и все функции бота Folk Valley. "
+            "Всегда отвечаешь на русском языке, если вопрос не требует другого языка."
+        )
+        
+        response = groq_client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": question}
+            ],
+            model="mixtral-8x7b-32768",
+            temperature=0.7,
+            max_tokens=1024,
+        )
+        return response.choices[0].message.content
     except Exception as e:
-        logging.error(f"Ошибка Pollinations: {e}")
+        logging.error(f"Ошибка Groq: {e}")
         return None
 
 # ==================== СЛОВА ДЛЯ /sosat ====================
@@ -445,7 +444,6 @@ def load_premium():
                 premium_users = {int(k): v for k, v in data.items()}
         except:
             premium_users = {}
-    # Автоматически добавляем админа в премиум навсегда
     if ADMIN_ID not in premium_users or premium_users[ADMIN_ID] < time.time():
         premium_users[ADMIN_ID] = time.time() + 365 * 24 * 60 * 60
         save_premium()
@@ -768,13 +766,11 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     message = update.message
     
-    # Проверка кулдауна
     cooldown, remaining = check_ai_cooldown(user_id)
     if cooldown:
         await message.reply_text(f"⏳ Подожди {remaining} секунд перед следующим вопросом!")
         return
     
-    # Проверка лимита
     used = get_ai_usage_today(user_id)
     limit = get_ai_limit(user_id)
     
@@ -787,7 +783,6 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Получаем вопрос
     question = " ".join(context.args) if context.args else ""
     if not question:
         await message.reply_text(
@@ -800,12 +795,11 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await message.reply_text("🤔 Думаю...")
     
     try:
-        answer = ask_pollinations(question)
+        answer = ask_groq(question)
         if answer is None:
             await status_msg.edit_text("❌ Ошибка получения ответа от AI. Попробуй позже.")
             return
         
-        # Сохраняем использованный вопрос
         increment_ai_usage(user_id)
         set_ai_cooldown(user_id)
         
@@ -1058,7 +1052,7 @@ async def my_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(text, parse_mode="Markdown")
 
-# ==================== СТАРЫЕ КОМАНДЫ (стикеры, мемы, поиск, игры) ====================
+# ==================== СТАРЫЕ КОМАНДЫ ====================
 async def folk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
@@ -1619,7 +1613,7 @@ async def answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             games[chat_id]["active"] = False
 
-# ==================== ТРИГГЕРЫ (бугульма, литвин, бред, п, кастомные) ====================
+# ==================== ТРИГГЕРЫ ====================
 async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_chat(update.effective_chat.id)
     message = update.message
@@ -1639,7 +1633,6 @@ async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(user_triggers[text_lower])
         return
     
-    # Триггер "бугульма" → /folk
     if "бугульма" in text_lower:
         add_activity(chat_id, user_id)
         cool, remain = check_cd(chat_id, user_id, 'folk')
@@ -1651,7 +1644,6 @@ async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         use_cd(chat_id, user_id, 'folk')
         return
     
-    # Триггер "литвин" → /litvin
     if "литвин" in text_lower:
         add_activity(chat_id, user_id)
         cool, remain = check_cd(chat_id, user_id, 'litvin')
@@ -1663,7 +1655,6 @@ async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         use_cd(chat_id, user_id, 'litvin')
         return
     
-    # Триггер "бред" → /bred
     if "бред" in text_lower:
         add_activity(chat_id, user_id)
         cool, remain = check_cd(chat_id, user_id, 'bred')
@@ -1675,7 +1666,6 @@ async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         use_cd(chat_id, user_id, 'bred')
         return
     
-    # Триггер "п" (только одна буква)
     if text == "п" or text == "П" or text == "p" or text == "P":
         add_activity(chat_id, user_id)
         await message.reply_text("п")
@@ -1822,4 +1812,4 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":
-    main() 
+    main()
