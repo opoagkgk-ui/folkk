@@ -5,4 +5,3 @@ aiohttp>=3.9.0
 deep-translator>=1.11.4
 httpx==0.25.2
 gTTS==2.3.2
-pollinations==0.0.3
