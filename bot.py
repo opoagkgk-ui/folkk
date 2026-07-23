@@ -592,6 +592,26 @@ user_groups = {}
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 
+# ==================== ТАЙМЕРЫ ДЛЯ ИГР ====================
+game_timers = {}  # {chat_id: asyncio.Task}
+
+async def auto_end_game(chat_id, context: ContextTypes.DEFAULT_TYPE):
+    """Автоматически завершает игру через 60 секунд."""
+    await asyncio.sleep(60)
+    
+    if chat_id in games and games[chat_id]["active"]:
+        games[chat_id]["active"] = False
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="⏰ **Игра завершена по таймауту!**\nТеперь можно запустить новую: `/game`",
+                parse_mode="Markdown"
+            )
+        except:
+            pass
+        if chat_id in game_timers:
+            del game_timers[chat_id]
+            
 # ==================== ФУНКЦИИ ДЛЯ РЕЙТИНГА ====================
 def load_stats():
     global user_stats
