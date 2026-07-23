@@ -9,11 +9,10 @@ import io
 import threading
 import base64
 import aiohttp
-import time
 from collections import defaultdict
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
-from telegram import Update, InlineQueryResultCachedSticker, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, LabeledPrice
+from telegram import Update, InlineQueryResultCachedSticker, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.constants import ChatMemberStatus
 from telegram.ext import (
     Application,
@@ -23,7 +22,6 @@ from telegram.ext import (
     MessageHandler,
     ContextTypes,
     filters,
-    PreCheckoutQueryHandler,
 )
 from deep_translator import GoogleTranslator
 from gtts import gTTS
@@ -39,50 +37,6 @@ MINI_APP_URL = "https://jalal-p7p9.onrender.com"
 IMGBB_API_KEY = "2bbaa8526b22fc8d7930403e13dbbdcd"
 UNSPLASH_ACCESS_KEY = "VTNenGnCKKbtcMddc_oN6qg5AGpmEXKUMDHK99qkbiA"
 
-# ==================== АДМИН ID ====================
-ADMIN_ID = 8371473442  # твой ID
-
-# ==================== OPENROUTER AI ====================
-OPENROUTER_API_KEY = "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"
-
-def ask_openrouter(question):
-    """Отправляет запрос к OpenRouter с бесплатной моделью."""
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    system_prompt = (
-        "Ты — Folk AI, дружелюбный и остроумный помощник из вселенной Folk Valley. "
-        "Твой стиль общения: лёгкий, с юмором, иногда саркастичный, но всегда доброжелательный. "
-        "Ты отвечаешь кратко и по делу, но с душой. Если пользователь шутит — поддерживаешь шутку. "
-        "Ты знаешь про мемы, стикеры, игры и все функции бота Folk Valley. "
-        "Всегда отвечаешь на русском языке, если вопрос не требует другого языка."
-    )
-    
-    payload = {
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question}
-        ],
-        "model": "mistralai/mistral-7b-instruct:free",
-        "temperature": 0.7,
-        "max_tokens": 1024,
-    }
-    
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
-        if response.status_code == 200:
-            data = response.json()
-            return data["choices"][0]["message"]["content"]
-        else:
-            logging.error(f"OpenRouter ошибка: {response.status_code} - {response.text}")
-            return None
-    except Exception as e:
-        logging.error(f"Ошибка OpenRouter: {e}")
-        return None
-
 # ==================== СЛОВА ДЛЯ /sosat ====================
 RANDOM_WORDS = [
     "кот", "привет", "чайник", "Владимир", "мандарин", "космос", "велосипед",
@@ -92,7 +46,184 @@ RANDOM_WORDS = [
     "огурец", "микрофон", "самокат", "трамвай", "облако", "одуван"
 ]
 
-# ==================== СТИКЕРЫ (ПОЛНЫЙ СПИСОК) ====================
+# ==================== ФАКТЫ ====================
+FACTS = [
+    "ты однажды пытался объяснить бабушке, что такое мем — и она до сих пор думает, что это новый вид супа",
+    "ты платишь за подписку на музыку, но слушаешь только песни 90-х из своего детства",
+    "ты готовишь еду на 3 дня вперёд, но съедаешь всё за один вечер",
+    "ты сохраняешь посты в Instagram 'на потом' и никогда туда не возвращаешься",
+    "ты искал свой телефон, держа его в руках, 3 раза за последнюю неделю",
+    "ты включаешь уведомления в игре, чтобы случайно не пропустить сбор ресурсов",
+    "ты пересматриваешь 'Офис' уже 5 раз, хотя знаешь все шутки наизусть",
+    "ты заказываешь доставку еды, потому что лень идти на кухню за 5 метров",
+    "ты смотришь видео с ремонтом квартир, хотя сам не забил гвоздь ни разу в жизни",
+    "ты добавляешь книги в список 'хочу прочитать' и забываешь про них навсегда",
+    "ты на работе открываешь Excel, а сам скроллишь мемы",
+    "ты пьёшь кофе в 10 вечера и удивляешься, почему не спишь",
+    "ты просыпаешься за 5 минут до будильника и злишься на целый день",
+    "ты считаешь, что салат — это здоровая еда, пока не зальёшь его майонезом",
+    "ты готов на всё ради скидки 5% в магазине, даже на абонемент в спортзал",
+    "ты пересматриваешь своё фото 20 раз, чтобы решить, нравится ли оно тебе",
+    "ты в 2 часа ночи смотришь видео с алмазными мозаиками и хочешь купить одну",
+    "ты делишься мемом в чат, хотя уже отправил его вчера",
+    "ты в магазине берёшь корзину, но в итоге покупаешь только хлеб и молоко",
+    "ты не можешь пройти мимо зеркала, не сделав странное лицо",
+    "ты планируешь начать бегать с понедельника каждую неделю уже год",
+    "ты считаешь шаги до холодильника за тренировку",
+    "ты смотришь прогноз погоды и всё равно выходишь без зонта",
+    "ты отвечаешь на сообщения через 3 часа, потому что 'думал над ответом'",
+    "ты в спорах всегда прав, даже если это признаёшь только мысленно",
+    "ты сохраняешь рецепты из интернета, но готовишь только доширак",
+    "ты идёшь в магазин за одним товаром, а возвращаешься с 5 пакетами",
+    "ты проверяешь телефон во время просмотра фильма и перематываешь назад 5 раз",
+    "ты считаешь, что у тебя есть суперспособность — находить потерянные вещи, когда они уже не нужны",
+    "ты обещаешь себе меньше сидеть в телефоне, но это сообщение — подтверждение обратного",
+    "ты думал, что квартира убирается сама, пока не понял, что это был ты",
+    "ты смотришь тиктоки и смеёшься, даже когда никто не видит",
+    "ты один раз попытался приготовить ужин и с тех пор заказываешь доставку",
+    "ты считаешь, что кофе — это не напиток, а состояние души",
+    "ты включаешь телевизор и засыпаешь под него, а просыпаешься — он всё ещё работает",
+    "ты прячешь сладости от себя и находишь их через неделю",
+    "ты считаешь, что после 23:00 все решения становятся гениальными",
+    "ты нажимаешь 'пропустить рекламу', даже если она тебе интересна",
+    "ты заводишь будильник за час до выхода и всё равно опаздываешь",
+    "ты гуглишь симптомы и находишь у себя все болезни, включая вымышленные",
+    "ты в 3 ночи думаешь о том, что сделал не так 5 лет назад",
+    "ты пересматриваешь старые чаты и понимаешь, что был слишком странным",
+    "ты фотографируешь еду, но не выкладываешь, потому что забыл",
+    "ты отвечаешь 'да, я в курсе', хотя понятия не имеешь, о чём речь",
+    "ты думал, что взрослая жизнь — это свобода, а это просто бесконечные счета",
+    "ты просыпаешься и думаешь: 'сегодня всё изменю', а заканчиваешь день дошираком",
+    "ты считаешь, что твой кот понимает тебя лучше, чем люди",
+    "ты включаешь режим 'не беспокоить', но всё равно проверяешь телефон каждые 5 минут",
+    "ты купил абонемент в спортзал и ходишь туда только за водой",
+    "ты считаешь, что мемы — это искусство, и никто не переубедит тебя",
+    "ты один раз разбил телефон и неделю жил без него — это были лучшие дни",
+    "ты считаешь, что у тебя есть 6-е чувство — чувство, что кто-то смотрит, когда ты ешь",
+    "ты начинаешь уборку с одного угла, а заканчиваешь в другом и уже не помнишь, что делал",
+    "ты считаешь, что инопланетяне уже здесь, и они просто ждут удобного момента",
+    "ты покупаешь книгу и читаешь её, только если она есть в аудиоформате",
+    "ты сохраняешь важные фотографии на телефон и забываешь их там",
+    "ты откладываешь важные дела на 'завтра' уже 3 года",
+    "ты считаешь, что у котиков есть свои мем-шпионы",
+    "ты готовишь настолько сложные ужины, что проще было заказать пиццу",
+    "ты считаешь, что тишина в чате — это признак того, что все заняты мемами",
+    "ты просыпаешься от звука собственных мыслей",
+    "ты уже год обещаешь себе выучить английский, но учишь только мемы на английском",
+    "ты считаешь, что авокадо — это переоценённый овощ, но всё равно его покупаешь",
+    "ты включаешь сериал на фоне и не понимаешь, что происходит, но смотришь до конца",
+    "ты считаешь, что кофе с утра — это ритуал, а не привычка",
+    "ты покупаешь скидочные товары и радуешься, хотя они тебе не нужны",
+    "ты считаешь, что если не ответить на сообщение, то оно исчезнет само",
+    "ты однажды разговаривал с растением и был уверен, что оно понимает",
+    "ты считаешь, что борщ — это не еда, а культура",
+    "ты включаешь музыку, но переключаешь трек, так и не дослушав ни один",
+    "ты считаешь, что в каждом чате есть главный мемологист, и это ты",
+    "ты ищешь вдохновение в ночи, а находишь только пустой холодильник",
+    "ты считаешь, что понедельник — это не день, а проверка на прочность",
+    "ты перечитываешь свои сообщения и удивляешься, зачем ты это написал",
+    "ты считаешь, что зима существует только для того, чтобы укрываться пледом",
+    "ты покупаешь технику и читаешь инструкцию, только если она на русском",
+    "ты считаешь, что смех — это лучшее лекарство, а мемы — его рецепт",
+    "ты однажды приготовил ужин, но забыл его съесть",
+    "ты считаешь, что у каждого есть суперспособность — находить странные видео в 3 ночи",
+    "ты включаешь новогодние фильмы летом, потому что настроение",
+    "ты считаешь, что петрушка — это не трава, а украшение",
+    "ты один раз попытался петь в караоке и с тех пор только слушаешь",
+    "ты считаешь, что носить пижаму целый день — это не лень, а стиль жизни",
+    "ты покупаешь продукты впрок, но они портятся, потому что ты ешь только доширак",
+    "ты считаешь, что дождь — это хороший повод не выходить из дома",
+    "ты собираешь плейлисты, но слушаешь только одно и то же",
+    "ты считаешь, что важные дела можно отложить на понедельник, даже если сегодня вторник",
+    "ты однажды сказал, что будешь писать книгу, и это было 5 лет назад",
+    "ты считаешь, что у твоего кота есть свои планы, в которые ты не посвящён",
+    "ты откладываешь просмотр сериала, чтобы посмотреть его залпом, и так и не начинаешь",
+    "ты считаешь, что чеснок — это защита не только от вампиров, но и от людей",
+    "ты однажды попытался учить программирование, но остановился на 'Hello, World!'",
+    "ты считаешь, что мемы — это единственное, что объединяет поколения",
+    "ты включаешь анимацию и думаешь, что это слишком круто для твоего возраста",
+    "ты считаешь, что магия существует, просто она в мемах",
+    "ты заказываешь еду на дом, потому что лень мыть посуду",
+    "ты считаешь, что ночь — это время для мемов и осознания жизни",
+    "ты покупаешь красивый блокнот, но пишешь там только списки покупок",
+    "ты считаешь, что если песня играет, значит, настроение улучшится",
+    "ты однажды попытался не использовать телефон целый день и сошёл с ума через час",
+    "ты считаешь, что самая сложная задача дня — выбрать, что посмотреть",
+    "ты покупаешь вещь, потому что она на скидке, и никогда её не носишь",
+    "ты считаешь, что есть 2 типа людей: те, кто любит мемы, и те, кто врёт",
+    "ты однажды хотел стать популярным, но понял, что популярность — это слишком сложно",
+    "ты считаешь, что лучший способ решить проблему — это съесть что-то вкусное",
+    "ты пытаешься просыпаться рано уже 3 года — и до сих пор не получается",
+    "ты считаешь, что чипсы — это не просто еда, а состояние души",
+    "ты один раз пытался приготовить торт, и он получился, но есть его было страшно",
+    "ты считаешь, что мемы — это лекарство от скуки",
+    "ты покупаешь абонемент, потому что он выгодный, и ходишь один раз",
+    "ты включаешь прямые эфиры, чтобы чувствовать себя частью чего-то важного",
+    "ты считаешь, что инопланетяне уже смотрят твои мемы и не понимают их",
+    "ты сохраняешь рецепты и забываешь, что они вообще есть",
+    "ты считаешь, что улыбка — это лучший аксессуар",
+    "ты однажды попытался не есть сладкое, и это длилось ровно день",
+    "ты считаешь, что мемы — это универсальный язык, понятный всем",
+    "ты хотел изменить жизнь, но залип в мемах",
+    "ты считаешь, что газировка — это ложь, но всё равно её пьёшь",
+    "ты однажды сказал 'я не буду смеяться', а потом сломался через 2 секунды",
+    "ты считаешь, что у котиков есть свой план по захвату мира",
+    "ты покупаешь одежду, потому что она крутая, и носишь её только дома",
+    "ты считаешь, что на 1 января надо загадывать желания, но всегда забываешь",
+    "ты однажды пытался не скроллить 5 минут и понял, что это невозможно",
+    "ты считаешь, что магия — это когда доширак готовится 3 минуты",
+    "ты покупаешь подписку и забываешь её отменить",
+    "ты считаешь, что мемы — это способ сказать то, что ты не можешь сказать словами",
+    "ты смотришь старые фото и думаешь: 'зачем я это делал?'",
+    "ты считаешь, что человек, который придумал смайлы, должен получить Нобелевскую премию",
+    "ты однажды сказал 'я всё контролирую', а потом уронил телефон",
+    "ты считаешь, что смешные видео лечат лучше любого врача",
+    "ты покупаешь вещи, потому что они красивые, и не знаешь, куда их деть",
+    "ты считаешь, что мемы — это искусство, и ты его ценитель",
+    "ты однажды не выходил из дома целый день и назвал это 'выходным'",
+    "ты считаешь, что ночь — лучшее время для продуктивности, но просто лежишь",
+    "ты думаешь, что стал взрослым, когда начал радоваться новой губке для посуды",
+    "ты считаешь, что если оставишь чат на 5 минут — пропустишь 100 мемов",
+    "ты уже не помнишь, зачем открыл телефон, но мемы листаешь с удовольствием",
+    "ты считаешь, что твой юмор понимают только избранные",
+    "ты говоришь 'я перестану есть по ночам', но заказываешь доставку в 2 часа",
+    "ты считаешь, что сосиска в тесте — это еда для души",
+    "ты переписываешься в чате и смеёшься над собственными мемами",
+    "ты считаешь, что у тебя есть талант — находить странные факты в интернете",
+    "ты однажды попытался сделать утреннюю зарядку и не повторил",
+    "ты считаешь, что если ты смеёшься — значит, всё хорошо",
+]
+
+# ==================== ЖИВОТНЫЕ ====================
+ANIMALS = [
+    {"name": "Ленивец", "emoji": "🦥", "description": "Ты — ленивец! Твой девиз: «Зачем спешить, если можно не спешить?» Ты мастер ничегонеделания и любишь долго обдумывать даже самые простые решения."},
+    {"name": "Кот", "emoji": "🐱", "description": "Ты — кот! Ты обожаешь внимание, но только когда тебе это нужно. В остальное время ты просто наблюдаешь за миром и иногда позволяешь себя гладить."},
+    {"name": "Собака", "emoji": "🐶", "description": "Ты — собака! Ты преданный друг, который всегда рад видеть всех. Ты любишь гулять, играть и иногда грызть тапки."},
+    {"name": "Пингвин", "emoji": "🐧", "description": "Ты — пингвин! Ты всегда хорошо выглядишь в костюме, идёшь по жизни по-деловому, но внутри ты просто хочешь скользить по льду."},
+    {"name": "Лиса", "emoji": "🦊", "description": "Ты — лиса! Ты умный и хитрый, всегда найдёшь выход из сложной ситуации. Главное — не попасться в капкан."},
+    {"name": "Панда", "emoji": "🐼", "description": "Ты — панда! Ты милый и неуклюжий. Любишь бамбук (и всё остальное) и считаешь, что объедаться — это нормально."},
+    {"name": "Совушка", "emoji": "🦉", "description": "Ты — сова! Ты мудрый и немного загадочный. Любишь ночные посиделки и считаешь себя главным экспертом во всём."},
+    {"name": "Дельфин", "emoji": "🐬", "description": "Ты — дельфин! Весёлый и дружелюбный, ты всегда находишь способ развеселить других. Любишь воду и свободу!"},
+    {"name": "Волк", "emoji": "🐺", "description": "Ты — волк! Ты сильный, независимый и немного загадочный. Ходишь своей тропой и никому не позволяешь вести тебя."},
+    {"name": "Заяц", "emoji": "🐇", "description": "Ты — заяц! Быстрый, пугливый, но очень обаятельный. Ты всегда в движении и часто оказываешься в центре событий."},
+    {"name": "Медведь", "emoji": "🐻", "description": "Ты — медведь! Ты выглядишь грозно, но внутри ты мягкий и добрый. Любишь мёд и долгий зимний сон."},
+    {"name": "Кролик", "emoji": "🐰", "description": "Ты — кролик! Милый, пушистый и обожаешь быть в центре внимания. Твоя самая сильная сторона — очарование."},
+    {"name": "Капибара", "emoji": "🦫", "description": "Ты — капибара! Ты дружишь со всеми, спокоен как удав и всегда готов прийти на помощь. Ты — король чата!"},
+    {"name": "Енот", "emoji": "🦝", "description": "Ты — енот! Ты обожаешь всё блестящее, любишь копаться в мусорках и часто оказываешься в центре хаоса."},
+    {"name": "Жираф", "emoji": "🦒", "description": "Ты — жираф! Ты всегда видишь ситуацию с высоты. Любишь быть в центре внимания и иметь широкий кругозор."},
+    {"name": "Хомяк", "emoji": "🐹", "description": "Ты — хомяк! Ты любишь запасать еду на зиму, а потом забываешь о ней. Милый, пухлый и всегда с щеками!"},
+    {"name": "Тигр", "emoji": "🐅", "description": "Ты — тигр! Ты сильный, грациозный и никого не боишься. Ты идёшь к цели, даже если она на другой стороне джунглей."},
+    {"name": "Обезьяна", "emoji": "🐒", "description": "Ты — обезьяна! Весёлый, энергичный и любишь быть в центре внимания. Ты умеешь поднимать настроение другим."},
+    {"name": "Ёжик", "emoji": "🦔", "description": "Ты — ёжик! Колючий снаружи, но мягкий внутри. Ты заботишься о себе и редко открываешься людям."},
+    {"name": "Корова", "emoji": "🐄", "description": "Ты — корова! Ты добрая, спокойная и всегда готова поделиться теплом. Любишь природу и свежий воздух."},
+    {"name": "Свинья", "emoji": "🐷", "description": "Ты — свинья! Ты ценишь уют, еду и простые радости. Ты всегда знаешь, где найти что-то вкусное."},
+    {"name": "Лягушка", "emoji": "🐸", "description": "Ты — лягушка! Ты прыгаешь от одной идеи к другой, и всегда находишь способ удивить собеседника."},
+    {"name": "Слон", "emoji": "🐘", "description": "Ты — слон! Ты — самый большой и добрый человек в чате. Ты никогда не забываешь обид (и хороших шуток тоже)"},
+    {"name": "Фламинго", "emoji": "🦩", "description": "Ты — фламинго! Ты яркий, стильный и любишь розовые оттенки. Ты всегда в тренде, даже если это просто стояние на одной ноге."},
+    {"name": "Крокодил", "emoji": "🐊", "description": "Ты — крокодил! Ты скрываешь свои эмоции, но внутри ты эмоциональный и иногда пускаешь слезу."},
+]
+
+# ==================== СТИКЕРЫ ====================
 ALL_STICKERS = [
     "CAACAgIAAxUAAWokXU38_MuMDT7hhvRuZctYuCKJAALIoAACX-ToSLg5DDhF1X44OwQ",
     "CAACAgIAAxUAAWokXU3n6LDpd626aZfX7VT1CippAAKapAAC1p_wSAAByejMhUYpHjsE",
@@ -437,171 +568,6 @@ bred_stickers = [
     "CAACAgIAAxUAAWokZOrG40e6MTW66zTsxm4Z-loOAAJOmAACHOB4SE3Urosl5Hw4OwQ",
 ]
 
-# ==================== ФАЙЛЫ ДЛЯ ХРАНЕНИЯ ====================
-PREMIUM_FILE = "premium_users.json"
-AI_USAGE_FILE = "ai_usage.json"
-TRIGGERS_FILE = "custom_triggers.json"
-CHATS_FILE = "all_chats.json"
-
-# ==================== ПРЕМИУМ-СИСТЕМА ====================
-premium_users = {}
-
-def load_premium():
-    global premium_users
-    if os.path.exists(PREMIUM_FILE):
-        try:
-            with open(PREMIUM_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                premium_users = {int(k): v for k, v in data.items()}
-        except:
-            premium_users = {}
-    if ADMIN_ID not in premium_users or premium_users[ADMIN_ID] < time.time():
-        premium_users[ADMIN_ID] = time.time() + 365 * 24 * 60 * 60
-        save_premium()
-
-def save_premium():
-    try:
-        with open(PREMIUM_FILE, 'w', encoding='utf-8') as f:
-            json.dump(premium_users, f, ensure_ascii=False, indent=2)
-    except:
-        pass
-
-def is_premium(user_id):
-    if user_id not in premium_users:
-        return False
-    return premium_users[user_id] > time.time()
-
-def add_premium(user_id, days=30):
-    expire_time = int(time.time()) + days * 24 * 60 * 60
-    premium_users[user_id] = expire_time
-    save_premium()
-
-def get_premium_days_left(user_id):
-    if user_id not in premium_users:
-        return 0
-    remaining = premium_users[user_id] - time.time()
-    if remaining < 0:
-        return 0
-    return int(remaining / 86400)
-
-# ==================== AI ЛИМИТЫ ====================
-ai_usage = {}
-
-def load_ai_usage():
-    global ai_usage
-    if os.path.exists(AI_USAGE_FILE):
-        try:
-            with open(AI_USAGE_FILE, 'r', encoding='utf-8') as f:
-                ai_usage = json.load(f)
-        except:
-            ai_usage = {}
-
-def save_ai_usage():
-    try:
-        with open(AI_USAGE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(ai_usage, f, ensure_ascii=False, indent=2)
-    except:
-        pass
-
-def get_ai_usage_today(user_id):
-    today = datetime.now().strftime("%Y-%m-%d")
-    key = f"{user_id}_{today}"
-    return ai_usage.get(key, 0)
-
-def increment_ai_usage(user_id):
-    today = datetime.now().strftime("%Y-%m-%d")
-    key = f"{user_id}_{today}"
-    ai_usage[key] = ai_usage.get(key, 0) + 1
-    save_ai_usage()
-
-def get_ai_limit(user_id):
-    if is_premium(user_id):
-        return 20
-    return 2
-
-# ==================== КУЛДАУН ДЛЯ AI ====================
-ai_cooldown = {}
-
-def check_ai_cooldown(user_id):
-    if user_id in ai_cooldown:
-        if time.time() - ai_cooldown[user_id] < 60:
-            return True, 60 - int(time.time() - ai_cooldown[user_id])
-    return False, 0
-
-def set_ai_cooldown(user_id):
-    ai_cooldown[user_id] = time.time()
-
-# ==================== ЧАТЫ (для рассылки) ====================
-def load_chats():
-    if os.path.exists(CHATS_FILE):
-        try:
-            with open(CHATS_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            return []
-    return []
-
-def save_chat(chat_id):
-    chats = load_chats()
-    if chat_id not in chats:
-        chats.append(chat_id)
-        with open(CHATS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(chats, f, ensure_ascii=False, indent=2)
-
-def get_all_chats():
-    return load_chats()
-
-# ==================== КАСТОМНЫЕ ТРИГГЕРЫ ====================
-custom_triggers = {}
-
-def load_triggers():
-    global custom_triggers
-    if os.path.exists(TRIGGERS_FILE):
-        try:
-            with open(TRIGGERS_FILE, 'r', encoding='utf-8') as f:
-                custom_triggers = json.load(f)
-        except:
-            custom_triggers = {}
-
-def save_triggers():
-    try:
-        with open(TRIGGERS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(custom_triggers, f, ensure_ascii=False, indent=2)
-    except:
-        pass
-
-# ==================== ЗАГРУЗКА НА IMGBB ====================
-def upload_to_imgbb(image_bytes):
-    url = "https://api.imgbb.com/1/upload"
-    encoded_image = base64.b64encode(image_bytes).decode('utf-8')
-    payload = {
-        "key": IMGBB_API_KEY,
-        "image": encoded_image,
-        "name": "meme.jpg",
-        "expiration": 86400
-    }
-    try:
-        resp = requests.post(url, data=payload, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("success"):
-            return data["data"]["url"]
-        else:
-            logging.error(f"Ошибка ImgBB: {data}")
-            return None
-    except Exception as e:
-        logging.error(f"Исключение при загрузке на ImgBB: {e}")
-        return None
-
-# ==================== ФУНКЦИЯ ПЕРЕВОДА ====================
-def translate_text(text, target_lang='en'):
-    try:
-        translated = GoogleTranslator(source='auto', target=target_lang).translate(text)
-        return translated
-    except Exception as e:
-        logging.error(f"Ошибка перевода: {e}")
-        return text
-
 # ==================== СЛОВАРИ ДЛЯ КУЛДАУНОВ ====================
 cooldowns_folk = {}
 cooldowns_litvin = {}
@@ -649,6 +615,38 @@ def add_activity(chat_id, user_id):
         user_stats[chat_id] = {}
     user_stats[chat_id][user_id] = user_stats[chat_id].get(user_id, 0) + 1
     save_stats()
+
+# ==================== ЗАГРУЗКА НА IMGBB ====================
+def upload_to_imgbb(image_bytes):
+    url = "https://api.imgbb.com/1/upload"
+    encoded_image = base64.b64encode(image_bytes).decode('utf-8')
+    payload = {
+        "key": IMGBB_API_KEY,
+        "image": encoded_image,
+        "name": "meme.jpg",
+        "expiration": 86400
+    }
+    try:
+        resp = requests.post(url, data=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("success"):
+            return data["data"]["url"]
+        else:
+            logging.error(f"Ошибка ImgBB: {data}")
+            return None
+    except Exception as e:
+        logging.error(f"Исключение при загрузке на ImgBB: {e}")
+        return None
+
+# ==================== ФУНКЦИЯ ПЕРЕВОДА ====================
+def translate_text(text, target_lang='en'):
+    try:
+        translated = GoogleTranslator(source='auto', target=target_lang).translate(text)
+        return translated
+    except Exception as e:
+        logging.error(f"Ошибка перевода: {e}")
+        return text
 
 # ==================== ФУНКЦИИ КУЛДАУНОВ ====================
 def load_user_groups():
@@ -724,9 +722,27 @@ async def search_unsplash(query, per_page=10):
             logging.error(f"Ошибка Unsplash: {e}")
             return []
 
+# ==================== НОВЫЕ КОМАНДЫ ====================
+async def factme(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Случайный факт о пользователе."""
+    user = update.effective_user
+    fact = random.choice(FACTS)
+    await update.message.reply_text(
+        f"🧠 **Факт о тебе, {user.first_name}:**\n\n{fact}",
+        parse_mode="Markdown"
+    )
+
+async def animal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Случайное животное с описанием."""
+    animal_data = random.choice(ANIMALS)
+    await update.message.reply_text(
+        f"🐾 **Ты — {animal_data['name']}!**\n\n"
+        f"{animal_data['emoji']} {animal_data['description']}",
+        parse_mode="Markdown"
+    )
+
 # ==================== ПРИВЕТСТВИЕ НОВЫХ УЧАСТНИКОВ ====================
 async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     for member in update.message.new_chat_members:
         if member.id == context.bot.id:
@@ -738,334 +754,41 @@ async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ==================== КОМАНДЫ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     if update.effective_chat.type == "private":
         keyboard = [[InlineKeyboardButton("👤 Профиль", web_app=WebAppInfo(url=MINI_APP_URL))]]
         await update.message.reply_text(
             "👋 Привет! Я бот Folk Valley.\n\n"
-            "🤖 **AI-чат:**\n"
-            "• `/ask` — задай любой вопрос (2/день, премиум 20/день)\n\n"
             "🎮 **Игры:**\n"
-            "• `/game` — выбрать игру\n"
+            "• `/game` — выбрать игру (угадай число, КНБ, викторина)\n"
+            "• Для ответа используй `/answer` (только для создателя игры)\n"
             "• `/top` — топ активных пользователей\n\n"
             "🐱 **Животные:**\n"
             "• `/cat` — случайный котик\n"
-            "• `/dog` — случайная собачка\n\n"
+            "• `/dog` — случайная собачка\n"
+            "• `/animal` — кто ты сегодня?\n\n"
+            "🧠 **Забавное:**\n"
+            "• `/factme` — случайный факт о тебе\n\n"
             "🎭 **Развлечения:**\n"
             "• `/folk`, `/litvin`, `/bred` — стикеры\n"
             "• `/sosat` — бессвязный бред\n"
-            "• `/zabava` — мем из фото + текст\n"
-            "• `/search` — поиск картинок\n"
+            "• `/zabava` — мем из фото + текст (1 верх, 2 низ)\n"
+            "• `/search` — поиск картинок (1 в группе, 3 в лс)\n"
             "• `/voice` — озвучить текст\n\n"
-            "⭐ **Премиум:** `/premium` — купить или проверить статус\n\n"
-            "🔄 **Триггеры:**\n"
-            "• Напиши «бугульма», «литвин» или «бред» — получишь стикер!\n"
-            "• Напиши просто «п» — бот ответит «п».\n"
-            "• Премиум-пользователи могут создавать свои триггеры: `/set_trigger слово ответ`\n\n"
             "⚙️ **Управление:**\n"
-            "• `/cooldown` — кулдауны (владелец группы)",
+            "• `/cooldown` — кулдауны (владелец группы)\n\n"
+            "🔄 **Триггеры:**\n"
+            "• «бугульма», «литвин», «бред» — стикеры\n"
+            "• «мой факт» — случайный факт о тебе\n"
+            "• «моё животное» — кто ты сегодня\n"
+            "• «п» — бот ответит «п»",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
     else:
-        await update.message.reply_text("Я в группе! /folk /litvin /bred /sosat /zabava /search /voice /game /top /cat /dog /cooldown")
+        await update.message.reply_text("Я в группе! /folk /litvin /bred /sosat /zabava /search /voice /game /top /cat /dog /animal /factme /cooldown")
 
-async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat(update.effective_chat.id)
-    add_activity(update.effective_chat.id, update.effective_user.id)
-    user_id = update.effective_user.id
-    message = update.message
-    
-    cooldown, remaining = check_ai_cooldown(user_id)
-    if cooldown:
-        await message.reply_text(f"⏳ Подожди {remaining} секунд перед следующим вопросом!")
-        return
-    
-    used = get_ai_usage_today(user_id)
-    limit = get_ai_limit(user_id)
-    
-    if used >= limit:
-        await message.reply_text(
-            f"⏳ Ты использовал все вопросы на сегодня!\n"
-            f"Лимит: {limit} вопросов/день\n"
-            f"Завтра будет новый лимит.\n"
-            f"Или купи премиум: /premium"
-        )
-        return
-    
-    question = " ".join(context.args) if context.args else ""
-    if not question:
-        await message.reply_text(
-            "❌ Напиши вопрос после команды!\n"
-            "Пример: `/ask Как приготовить пиццу?`",
-            parse_mode="Markdown"
-        )
-        return
-    
-    status_msg = await message.reply_text("🤔 Думаю...")
-    
-    try:
-        answer = ask_openrouter(question)
-        if answer is None:
-            await status_msg.edit_text("❌ Ошибка получения ответа от AI. Попробуй позже.")
-            return
-        
-        increment_ai_usage(user_id)
-        set_ai_cooldown(user_id)
-        
-        remaining = limit - used - 1
-        
-        await status_msg.edit_text(
-            f"🤖 **Ответ:**\n\n{answer}\n\n"
-            f"💡 Осталось вопросов: {remaining}",
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        await status_msg.edit_text(f"❌ Ошибка: {e}")
-
-# ==================== ПРЕМИУМ КОМАНДА ====================
-async def premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat(update.effective_chat.id)
-    add_activity(update.effective_chat.id, update.effective_user.id)
-    user_id = update.effective_user.id
-    message = update.message
-    
-    if is_premium(user_id):
-        days_left = get_premium_days_left(user_id)
-        await message.reply_text(
-            f"⭐ **У вас есть премиум!**\n\n"
-            f"Осталось дней: **{days_left}**\n\n"
-            f"🔹 Ваши возможности:\n"
-            f"• До 20 вопросов к AI в день\n"
-            f"• Создание кастомных триггеров\n"
-            f"• Приоритетная обработка команд\n\n"
-            f"Спасибо, что с нами! ❤️",
-            parse_mode="Markdown"
-        )
-    else:
-        kb = [
-            [InlineKeyboardButton("💎 Купить премиум (30 дней)", callback_data="premium:buy")],
-        ]
-        await message.reply_text(
-            "⭐ **Премиум-доступ к Folk Valley Bot!**\n\n"
-            "Получи максимум от бота:\n\n"
-            "🔹 **До 20 вопросов к AI в день** (вместо 2)\n"
-            "🔹 **Кастомные триггеры** — создавай свои команды\n"
-            "🔹 **Приоритетная обработка** команд\n\n"
-            "💎 Стоимость: **100 Telegram Stars** за 30 дней\n\n"
-            "Нажми кнопку ниже, чтобы купить!",
-            reply_markup=InlineKeyboardMarkup(kb),
-            parse_mode="Markdown"
-        )
-
-async def premium_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text(
-        "💎 **Покупка премиума через Telegram Stars**\n\n"
-        "К сожалению, оплата через Stars пока не подключена.\n"
-        "Напишите @palo_dev для получения премиума!",
-        parse_mode="Markdown"
-    )
-
-# ==================== КОМАНДЫ ДЛЯ АДМИНА ====================
-async def give_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("❌ Только для администратора!")
-        return
-    
-    if not context.args:
-        await update.message.reply_text(
-            "❌ Укажи ID пользователя!\n"
-            "Пример: `/give_premium 123456789`\n"
-            "Или с количеством дней: `/give_premium 123456789 7`",
-            parse_mode="Markdown"
-        )
-        return
-    
-    try:
-        target_id = int(context.args[0])
-        days = 30
-        if len(context.args) > 1:
-            days = int(context.args[1])
-        
-        add_premium(target_id, days)
-        await update.message.reply_text(
-            f"✅ Пользователю `{target_id}` выдан премиум на {days} дней!",
-            parse_mode="Markdown"
-        )
-    except ValueError:
-        await update.message.reply_text("❌ Неверный формат ID!")
-
-async def chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("❌ Только для администратора!")
-        return
-    
-    chats = get_all_chats()
-    if not chats:
-        await update.message.reply_text("📭 Нет сохранённых чатов.")
-        return
-    
-    private = []
-    groups = []
-    
-    for chat_id in chats:
-        try:
-            chat = await context.bot.get_chat(chat_id)
-            if chat.type == "private":
-                name = chat.first_name or "пользователь"
-                private.append((chat_id, name))
-            else:
-                name = chat.title or "группа"
-                groups.append((chat_id, name))
-        except:
-            groups.append((chat_id, f"ID: {chat_id}"))
-    
-    text = f"📊 **Всего чатов: {len(chats)}**\n\n"
-    
-    if private:
-        text += f"👤 **Личные ({len(private)}):**\n"
-        for chat_id, name in private[:20]:
-            text += f"• `{chat_id}` — {name}\n"
-        if len(private) > 20:
-            text += f"… и ещё {len(private) - 20} личных\n"
-        text += "\n"
-    
-    if groups:
-        text += f"👥 **Группы ({len(groups)}):**\n"
-        for chat_id, name in groups[:20]:
-            text += f"• `{chat_id}` — {name}\n"
-        if len(groups) > 20:
-            text += f"… и ещё {len(groups) - 20} групп\n"
-    
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("❌ Только для администратора!")
-        return
-    
-    if not context.args:
-        await update.message.reply_text(
-            "❌ Напиши текст для рассылки!\n"
-            "Пример: `/broadcast Привет всем!`",
-            parse_mode="Markdown"
-        )
-        return
-    
-    message_text = " ".join(context.args)
-    chats = get_all_chats()
-    
-    if not chats:
-        await update.message.reply_text("📭 Нет сохранённых чатов.")
-        return
-    
-    status_msg = await update.message.reply_text(f"🚀 Начинаю рассылку в {len(chats)} чатов...")
-    
-    sent = 0
-    failed = 0
-    
-    for idx, chat_id in enumerate(chats, 1):
-        try:
-            await context.bot.send_message(chat_id=chat_id, text=message_text)
-            sent += 1
-        except:
-            failed += 1
-        
-        if idx % 30 == 0:
-            await asyncio.sleep(1)
-        else:
-            await asyncio.sleep(0.1)
-    
-    await status_msg.edit_text(
-        f"✅ **Рассылка завершена!**\n"
-        f"📤 Отправлено: {sent}\n"
-        f"❌ Ошибок: {failed}\n"
-        f"📊 Всего чатов: {len(chats)}",
-        parse_mode="Markdown"
-    )
-
-# ==================== КАСТОМНЫЕ ТРИГГЕРЫ ====================
-async def set_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    save_chat(update.effective_chat.id)
-    add_activity(update.effective_chat.id, user_id)
-    
-    if not is_premium(user_id):
-        await update.message.reply_text(
-            "⭐ Создание кастомных триггеров доступно только премиум-пользователям!\n"
-            "Купи премиум: /premium"
-        )
-        return
-    
-    if not context.args or len(context.args) < 2:
-        await update.message.reply_text(
-            "❌ Использование: `/set_trigger слово текст_ответа`\n"
-            "Пример: `/set_trigger привет И тебе привет!`",
-            parse_mode="Markdown"
-        )
-        return
-    
-    trigger_word = context.args[0].lower()
-    response_text = " ".join(context.args[1:])
-    
-    key = f"{user_id}_{trigger_word}"
-    custom_triggers[key] = response_text
-    save_triggers()
-    
-    await update.message.reply_text(f"✅ Триггер «{trigger_word}» сохранён!")
-
-async def remove_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    save_chat(update.effective_chat.id)
-    add_activity(update.effective_chat.id, user_id)
-    
-    if not is_premium(user_id):
-        await update.message.reply_text("⭐ Только для премиум-пользователей!")
-        return
-    
-    if not context.args:
-        await update.message.reply_text(
-            "❌ Использование: `/remove_trigger слово`",
-            parse_mode="Markdown"
-        )
-        return
-    
-    trigger_word = context.args[0].lower()
-    key = f"{user_id}_{trigger_word}"
-    
-    if key in custom_triggers:
-        del custom_triggers[key]
-        save_triggers()
-        await update.message.reply_text(f"✅ Триггер «{trigger_word}» удалён!")
-    else:
-        await update.message.reply_text(f"❌ Триггер «{trigger_word}» не найден!")
-
-async def my_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    save_chat(update.effective_chat.id)
-    add_activity(update.effective_chat.id, user_id)
-    
-    user_triggers = {k.split("_")[1]: v for k, v in custom_triggers.items() if k.startswith(f"{user_id}_")}
-    
-    if not user_triggers:
-        await update.message.reply_text("📭 У тебя нет сохранённых триггеров.")
-        return
-    
-    text = "📋 **Твои триггеры:**\n\n"
-    for word, response in user_triggers.items():
-        text += f"• `{word}` → {response}\n"
-    
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-# ==================== СТАРЫЕ КОМАНДЫ ====================
 async def folk(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     chat_id, user_id = update.effective_chat.id, update.effective_user.id
     cool, remain = check_cd(chat_id, user_id, 'folk')
@@ -1073,11 +796,13 @@ async def folk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         m, s = divmod(remain.seconds, 60)
         await update.message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
         return
+    if not ALL_STICKERS:
+        await update.message.reply_text("Стикеры не загружены.")
+        return
     await update.message.reply_sticker(sticker=random.choice(ALL_STICKERS))
     use_cd(chat_id, user_id, 'folk')
 
 async def litvin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     chat_id, user_id = update.effective_chat.id, update.effective_user.id
     cool, remain = check_cd(chat_id, user_id, 'litvin')
@@ -1085,11 +810,13 @@ async def litvin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         m, s = divmod(remain.seconds, 60)
         await update.message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
         return
+    if not litvin_stickers:
+        await update.message.reply_text("Стикеры не загружены.")
+        return
     await update.message.reply_sticker(sticker=random.choice(litvin_stickers))
     use_cd(chat_id, user_id, 'litvin')
 
 async def bred(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     chat_id, user_id = update.effective_chat.id, update.effective_user.id
     cool, remain = check_cd(chat_id, user_id, 'bred')
@@ -1097,18 +824,19 @@ async def bred(update: Update, context: ContextTypes.DEFAULT_TYPE):
         m, s = divmod(remain.seconds, 60)
         await update.message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
         return
+    if not bred_stickers:
+        await update.message.reply_text("Стикеры не загружены.")
+        return
     await update.message.reply_sticker(sticker=random.choice(bred_stickers))
     use_cd(chat_id, user_id, 'bred')
 
 async def sosat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     words = random.choices(RANDOM_WORDS, k=random.randint(3, 6))
     await update.message.reply_text(" ".join(words))
 
 # ==================== /zabava ====================
 async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     message = update.message
     if not message.photo and not (message.reply_to_message and message.reply_to_message.photo):
@@ -1202,7 +930,6 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== /search ====================
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
@@ -1266,7 +993,6 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== /voice ====================
 async def voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
@@ -1295,7 +1021,6 @@ async def voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== /cat ====================
 async def cat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     url = "https://api.thecatapi.com/v1/images/search"
     try:
@@ -1311,7 +1036,6 @@ async def cat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== /dog ====================
 async def dog(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     url = "https://api.thedogapi.com/v1/images/search"
     try:
@@ -1327,7 +1051,6 @@ async def dog(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== /top ====================
 async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     chat_id = update.effective_chat.id
     chat_type = update.effective_chat.type
@@ -1362,7 +1085,6 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== /game ====================
 async def game(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
@@ -1392,6 +1114,7 @@ async def game(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
+# ==================== ОБРАБОТЧИК КНОПОК ИГР ====================
 async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1490,6 +1213,7 @@ async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
 
+# ==================== ОБРАБОТЧИК RPS ====================
 async def game_rps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1537,8 +1261,8 @@ async def game_rps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
+# ==================== /answer ====================
 async def answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
@@ -1566,67 +1290,81 @@ async def answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     if game_data["type"] == "guess":
-        try:
-            guess = int(answer_text.strip())
-        except:
-            await message.reply_text("❌ Напиши число! Например: `/answer 50`", parse_mode="Markdown")
-            return
-        
-        if guess < 1 or guess > 100:
-            await message.reply_text("❌ Число должно быть от 1 до 100!")
-            return
-        
-        game_data["data"]["tries"] += 1
-        game_data["data"]["users"].add(user_id)
-        number = game_data["data"]["number"]
-        
-        if guess == number:
-            await message.reply_text(
-                f"🎉 **Поздравляю!**\n"
-                f"Ты угадал число **{number}**!\n"
-                f"Попыток: {game_data['data']['tries']}\n\n"
-                f"🔄 Сыграть ещё раз: `/game`",
-                parse_mode="Markdown"
-            )
-            games[chat_id]["active"] = False
-            return
-        
-        hint = "📈 Больше!" if guess < number else "📉 Меньше!"
+        await handle_guess_answer(update, context, game_data, answer_text)
+    elif game_data["type"] == "quiz":
+        await handle_quiz_answer(update, context, game_data, answer_text)
+    else:
+        await message.reply_text("❌ Неизвестный тип игры!")
+
+# ==================== ОБРАБОТЧИКИ ОТВЕТОВ ====================
+async def handle_guess_answer(update: Update, context: ContextTypes.DEFAULT_TYPE, game_data, answer_text):
+    message = update.message
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    try:
+        guess = int(answer_text.strip())
+    except:
+        await message.reply_text("❌ Напиши число! Например: `/answer 50`", parse_mode="Markdown")
+        return
+    
+    if guess < 1 or guess > 100:
+        await message.reply_text("❌ Число должно быть от 1 до 100!")
+        return
+    
+    game_data["data"]["tries"] += 1
+    game_data["data"]["users"].add(user_id)
+    number = game_data["data"]["number"]
+    
+    if guess == number:
         await message.reply_text(
-            f"❌ Не угадал! **{hint}**\n"
-            f"Попыток: {game_data['data']['tries']}",
+            f"🎉 **Поздравляю!**\n"
+            f"Ты угадал число **{number}**!\n"
+            f"Попыток: {game_data['data']['tries']}\n\n"
+            f"🔄 Сыграть ещё раз: `/game`",
             parse_mode="Markdown"
         )
+        games[chat_id]["active"] = False
+        return
     
-    elif game_data["type"] == "quiz":
-        if game_data["data"].get("answered", False):
-            await message.reply_text("❌ Ты уже отвечал на этот вопрос! Начни новую игру.")
-            return
-        
-        user_answer = answer_text.strip().lower()
-        correct_answer = game_data["data"]["answer"]
-        
-        if user_answer == correct_answer:
-            await message.reply_text(
-                f"🎉 **Правильно!**\n"
-                f"Ответ: {correct_answer}\n\n"
-                f"🔄 Сыграть ещё раз: `/game`",
-                parse_mode="Markdown"
-            )
-            games[chat_id]["active"] = False
-        else:
-            game_data["data"]["answered"] = True
-            await message.reply_text(
-                f"❌ **Неправильно!**\n"
-                f"Правильный ответ: {correct_answer}\n\n"
-                f"🔄 Сыграть ещё раз: `/game`",
-                parse_mode="Markdown"
-            )
-            games[chat_id]["active"] = False
+    hint = "📈 Больше!" if guess < number else "📉 Меньше!"
+    await message.reply_text(
+        f"❌ Не угадал! **{hint}**\n"
+        f"Попыток: {game_data['data']['tries']}",
+        parse_mode="Markdown"
+    )
+
+async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE, game_data, answer_text):
+    message = update.message
+    chat_id = update.effective_chat.id
+    
+    if game_data["data"].get("answered", False):
+        await message.reply_text("❌ Ты уже отвечал на этот вопрос! Начни новую игру.")
+        return
+    
+    user_answer = answer_text.strip().lower()
+    correct_answer = game_data["data"]["answer"]
+    
+    if user_answer == correct_answer:
+        await message.reply_text(
+            f"🎉 **Правильно!**\n"
+            f"Ответ: {correct_answer}\n\n"
+            f"🔄 Сыграть ещё раз: `/game`",
+            parse_mode="Markdown"
+        )
+        games[chat_id]["active"] = False
+    else:
+        game_data["data"]["answered"] = True
+        await message.reply_text(
+            f"❌ **Неправильно!**\n"
+            f"Правильный ответ: {correct_answer}\n\n"
+            f"🔄 Сыграть ещё раз: `/game`",
+            parse_mode="Markdown"
+        )
+        games[chat_id]["active"] = False
 
 # ==================== ТРИГГЕРЫ ====================
 async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat(update.effective_chat.id)
     message = update.message
     if not message.text:
         return
@@ -1637,13 +1375,7 @@ async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     
-    # Кастомные триггеры (только для создателя)
-    user_triggers = {k.split("_")[1]: v for k, v in custom_triggers.items() if k.startswith(f"{user_id}_")}
-    if text_lower in user_triggers:
-        add_activity(chat_id, user_id)
-        await message.reply_text(user_triggers[text_lower])
-        return
-    
+    # Триггер "бугульма" → /folk
     if "бугульма" in text_lower:
         add_activity(chat_id, user_id)
         cool, remain = check_cd(chat_id, user_id, 'folk')
@@ -1651,10 +1383,12 @@ async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
             m, s = divmod(remain.seconds, 60)
             await message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
             return
-        await message.reply_sticker(sticker=random.choice(ALL_STICKERS))
-        use_cd(chat_id, user_id, 'folk')
+        if ALL_STICKERS:
+            await message.reply_sticker(sticker=random.choice(ALL_STICKERS))
+            use_cd(chat_id, user_id, 'folk')
         return
     
+    # Триггер "литвин" → /litvin
     if "литвин" in text_lower:
         add_activity(chat_id, user_id)
         cool, remain = check_cd(chat_id, user_id, 'litvin')
@@ -1662,10 +1396,12 @@ async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
             m, s = divmod(remain.seconds, 60)
             await message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
             return
-        await message.reply_sticker(sticker=random.choice(litvin_stickers))
-        use_cd(chat_id, user_id, 'litvin')
+        if litvin_stickers:
+            await message.reply_sticker(sticker=random.choice(litvin_stickers))
+            use_cd(chat_id, user_id, 'litvin')
         return
     
+    # Триггер "бред" → /bred
     if "бред" in text_lower:
         add_activity(chat_id, user_id)
         cool, remain = check_cd(chat_id, user_id, 'bred')
@@ -1673,10 +1409,34 @@ async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
             m, s = divmod(remain.seconds, 60)
             await message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
             return
-        await message.reply_sticker(sticker=random.choice(bred_stickers))
-        use_cd(chat_id, user_id, 'bred')
+        if bred_stickers:
+            await message.reply_sticker(sticker=random.choice(bred_stickers))
+            use_cd(chat_id, user_id, 'bred')
         return
     
+    # Триггер "мой факт" → /factme
+    if text_lower == "мой факт":
+        add_activity(chat_id, user_id)
+        fact = random.choice(FACTS)
+        user = update.effective_user
+        await message.reply_text(
+            f"🧠 **Факт о тебе, {user.first_name}:**\n\n{fact}",
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Триггер "моё животное" → /animal
+    if text_lower == "моё животное" or text_lower == "мое животное":
+        add_activity(chat_id, user_id)
+        animal_data = random.choice(ANIMALS)
+        await message.reply_text(
+            f"🐾 **Ты — {animal_data['name']}!**\n\n"
+            f"{animal_data['emoji']} {animal_data['description']}",
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Триггер "п"
     if text == "п" or text == "П" or text == "p" or text == "P":
         add_activity(chat_id, user_id)
         await message.reply_text("п")
@@ -1684,7 +1444,6 @@ async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== КУЛДАУНЫ ====================
 async def cooldown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat(update.effective_chat.id)
     chat, user = update.effective_chat, update.effective_user
     if chat.type not in ("group", "supergroup"):
         return
@@ -1763,13 +1522,9 @@ def run_flask():
 def main():
     load_user_groups()
     load_stats()
-    load_premium()
-    load_ai_usage()
-    load_triggers()
     
     app = Application.builder().token(TOKEN).build()
 
-    # Основные команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("folk", folk))
     app.add_handler(CommandHandler("litvin", litvin))
@@ -1781,37 +1536,14 @@ def main():
     app.add_handler(CommandHandler("cat", cat))
     app.add_handler(CommandHandler("dog", dog))
     app.add_handler(CommandHandler("top", top))
-    
-    # Игры
     app.add_handler(CommandHandler("game", game))
     app.add_handler(CommandHandler("answer", answer))
-    
-    # AI
-    app.add_handler(CommandHandler("ask", ask))
-    
-    # Премиум
-    app.add_handler(CommandHandler("premium", premium))
-    app.add_handler(CallbackQueryHandler(premium_callback, pattern="^premium:"))
-    
-    # Админ-команды
-    app.add_handler(CommandHandler("give_premium", give_premium))
-    app.add_handler(CommandHandler("chats", chats))
-    app.add_handler(CommandHandler("broadcast", broadcast))
-    
-    # Кастомные триггеры
-    app.add_handler(CommandHandler("set_trigger", set_trigger))
-    app.add_handler(CommandHandler("remove_trigger", remove_trigger))
-    app.add_handler(CommandHandler("my_triggers", my_triggers))
-    
-    # Кулдауны
     app.add_handler(CommandHandler("cooldown", cooldown_cmd))
-    
-    # Обработчики
+    app.add_handler(CommandHandler("factme", factme))
+    app.add_handler(CommandHandler("animal", animal))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_triggers))
     app.add_handler(InlineQueryHandler(inline_query))
-    
-    # Callback-обработчики
     app.add_handler(CallbackQueryHandler(cd_button, pattern="^cd:"))
     app.add_handler(CallbackQueryHandler(game_callback, pattern="^game_start:"))
     app.add_handler(CallbackQueryHandler(game_callback, pattern="^game_stop:"))
