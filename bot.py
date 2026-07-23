@@ -9,6 +9,7 @@ import io
 import threading
 import base64
 import aiohttp
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
@@ -31,6 +32,8 @@ from io import BytesIO
 TOKEN = os.environ.get("API_TOKEN")
 if not TOKEN:
     raise ValueError("Переменная окружения API_TOKEN не установлена!")
+
+ADMIN_ID = 8371473442
 
 MINI_APP_URL = "https://jalal-p7p9.onrender.com"
 
@@ -721,6 +724,150 @@ async def search_unsplash(query, per_page=10):
         except Exception as e:
             logging.error(f"Ошибка Unsplash: {e}")
             return []
+
+# ==================== АДМИН-КОМАНДЫ ====================
+async def chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает список всех чатов, где есть бот (только для админа)."""
+    user = update.effective_user
+    
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("❌ У тебя нет прав для этой команды!")
+        return
+    
+    url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
+    params = {"limit": 100, "offset": 0}
+    
+    try:
+        response = requests.get(url, params=params, timeout=30)
+        data = response.json()
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+        return
+    
+    if not data.get("ok"):
+        await update.message.reply_text("❌ Не удалось получить список чатов!")
+        return
+    
+    updates = data.get("result", [])
+    chat_ids = set()
+    chat_info = {}
+    
+    for upd in updates:
+        chat_id = None
+        chat_type = None
+        chat_title = None
+        
+        if "message" in upd and "chat" in upd["message"]:
+            chat = upd["message"]["chat"]
+            chat_id = chat["id"]
+            chat_type = chat.get("type", "unknown")
+            chat_title = chat.get("title") or chat.get("first_name") or "Без названия"
+        elif "callback_query" in upd and "message" in upd["callback_query"]:
+            chat = upd["callback_query"]["message"]["chat"]
+            chat_id = chat["id"]
+            chat_type = chat.get("type", "unknown")
+            chat_title = chat.get("title") or chat.get("first_name") or "Без названия"
+        elif "my_chat_member" in upd:
+            chat = upd["my_chat_member"]["chat"]
+            chat_id = chat["id"]
+            chat_type = chat.get("type", "unknown")
+            chat_title = chat.get("title") or chat.get("first_name") or "Без названия"
+        
+        if chat_id:
+            chat_ids.add(chat_id)
+            chat_info[chat_id] = (chat_type, chat_title)
+    
+    if not chat_ids:
+        await update.message.reply_text("📭 Бот пока не состоит ни в одном чате!")
+        return
+    
+    result = f"📊 **Всего чатов:** {len(chat_ids)}\n\n"
+    
+    for chat_id in sorted(chat_ids):
+        chat_type, chat_title = chat_info.get(chat_id, ("unknown", "Неизвестно"))
+        emoji = "👤" if chat_type == "private" else "👥"
+        result += f"{emoji} `{chat_id}` — {chat_title}\n"
+    
+    await update.message.reply_text(result, parse_mode="Markdown")
+
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправляет сообщение во все чаты, где есть бот (только для админа)."""
+    user = update.effective_user
+    
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("❌ У тебя нет прав для этой команды!")
+        return
+    
+    text = " ".join(context.args) if context.args else ""
+    if not text:
+        await update.message.reply_text(
+            "❌ Напиши текст для рассылки:\n"
+            "`/broadcast Текст сообщения`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
+    params = {"limit": 100, "offset": 0}
+    
+    try:
+        response = requests.get(url, params=params, timeout=30)
+        data = response.json()
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+        return
+    
+    if not data.get("ok"):
+        await update.message.reply_text("❌ Не удалось получить список чатов!")
+        return
+    
+    updates = data.get("result", [])
+    chat_ids = set()
+    
+    for upd in updates:
+        chat_id = None
+        if "message" in upd and "chat" in upd["message"]:
+            chat_id = upd["message"]["chat"]["id"]
+        elif "callback_query" in upd and "message" in upd["callback_query"]:
+            chat_id = upd["callback_query"]["message"]["chat"]["id"]
+        elif "my_chat_member" in upd:
+            chat_id = upd["my_chat_member"]["chat"]["id"]
+        if chat_id:
+            chat_ids.add(chat_id)
+    
+    if not chat_ids:
+        await update.message.reply_text("📭 Бот пока не состоит ни в одном чате!")
+        return
+    
+    status_msg = await update.message.reply_text(f"🚀 Начинаю рассылку в {len(chat_ids)} чатов...")
+    
+    sent = 0
+    failed = 0
+    
+    for chat_id in chat_ids:
+        try:
+            send_url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+            payload = {
+                "chat_id": chat_id,
+                "text": text,
+                "disable_notification": True
+            }
+            response = requests.post(send_url, json=payload, timeout=15)
+            if response.status_code == 200:
+                sent += 1
+            else:
+                failed += 1
+        except Exception:
+            failed += 1
+        time.sleep(0.3)
+    
+    await status_msg.edit_text(
+        f"✅ **Рассылка завершена!**\n\n"
+        f"📤 Отправлено: {sent}\n"
+        f"❌ Ошибок: {failed}\n"
+        f"📊 Всего чатов: {len(chat_ids)}",
+        parse_mode="Markdown"
+    )
 
 # ==================== НОВЫЕ КОМАНДЫ ====================
 async def factme(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1541,6 +1688,8 @@ def main():
     app.add_handler(CommandHandler("cooldown", cooldown_cmd))
     app.add_handler(CommandHandler("factme", factme))
     app.add_handler(CommandHandler("animal", animal))
+    app.add_handler(CommandHandler("chats", chats))
+    app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_triggers))
     app.add_handler(InlineQueryHandler(inline_query))
