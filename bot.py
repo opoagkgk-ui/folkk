@@ -23,7 +23,6 @@ from telegram.ext import (
     MessageHandler,
     ContextTypes,
     filters,
-    PreCheckoutQueryHandler,
 )
 from deep_translator import GoogleTranslator
 from gtts import gTTS
@@ -46,7 +45,6 @@ UNSPLASH_ACCESS_KEY = "VTNenGnCKKbtcMddc_oN6qg5AGpmEXKUMDHK99qkbiA"
 FONT_URLS = [
     "https://raw.githubusercontent.com/ArtifexSoftware/urw-base35-fonts/master/Impact.ttf",
     "https://github.com/ArtifexSoftware/urw-base35-fonts/raw/master/Impact.ttf",
-    "https://raw.githubusercontent.com/paulgessinger/impact/master/Impact.ttf",  # может не работать
 ]
 FONT_PATH = "Impact.ttf"
 
@@ -73,16 +71,14 @@ def download_font():
 
 def get_impact_font(size):
     """Возвращает шрифт Impact или запасной."""
-    # Сначала пробуем загрузить
     if not os.path.exists(FONT_PATH):
         download_font()
     
     paths = [
         FONT_PATH,
-        "/app/shared/Impact.ttf",          # если ты загрузишь вручную
+        "/app/shared/Impact.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        "/usr/share/fonts/truetype/msttcorefonts/Impact.ttf",  # если установлен пакет msttcorefonts
     ]
     
     for path in paths:
@@ -92,9 +88,8 @@ def get_impact_font(size):
             except:
                 continue
     
-    # Если ничего не найдено — используем встроенный шрифт PIL
     return ImageFont.load_default().font_variant(size=size)
-    
+
 # ==================== СОХРАНЕНИЕ ЧАТОВ ====================
 CHATS_DB_FILE = "all_chats.json"
 DONATIONS_FILE = "donations.json"
@@ -102,7 +97,7 @@ DONATION_INPUT = {}  # {user_id: True} для ожидания ввода сво
 
 def save_chat_id(chat_id):
     try:
-        with open(CHATS_B_FILE, "r", encoding="utf-8") as f:
+        with open(CHATS_DB_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         data = []
@@ -112,137 +107,26 @@ def save_chat_id(chat_id):
             json.dump(data, f, ensure_ascii=False, indent=2)
 
 # ==================== ДОНАТЫ ====================
-async def donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /donate — создание доната через Telegram Stars (только в ЛС)."""
-    if update.effective_chat.type != "private":
-        await update.message.reply_text("❌ Эта команда доступна только в личных сообщениях!")
-        return
-    
-    user_id = update.effective_user.id
-    kb = [
-        [
-            InlineKeyboardButton("⭐ 10 звезд", callback_data=f"donate_10"),
-            InlineKeyboardButton("⭐ 50 звезд", callback_data=f"donate_50"),
-        ],
-        [
-            InlineKeyboardButton("⭐ 100 звезд", callback_data=f"donate_100"),
-            InlineKeyboardButton("⭐ 200 звезд", callback_data=f"donate_200"),
-        ],
-        [
-            InlineKeyboardButton("⭐ 500 звезд", callback_data=f"donate_500"),
-        ],
-        [
-            InlineKeyboardButton("✏️ Своя сумма", callback_data=f"donate_custom"),
-        ],
-    ]
-    await update.message.reply_text(
-        "🌟 **Поддержи бота звёздами!**\n\n"
-        "Выбери сумму доната в звёздах Telegram. После оплаты ты получишь уведомление, а бот запомнит твой вклад.",
-        reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode="Markdown"
-    )
-
-async def donate_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    data = query.data
-    amount = None
-    
-    if data == "donate_custom":
-        DONATION_INPUT[user_id] = True
-        await query.edit_message_text(
-            "✏️ **Введи свою сумму в звёздах** (целое число, например, 150).\n"
-            "Просто напиши число в чат.",
-            parse_mode="Markdown"
-        )
-        return
-    
+def load_donations():
     try:
-        amount = int(data.split("_")[1])
-    except:
-        await query.edit_message_text("❌ Ошибка! Попробуй снова.")
-        return
-    
-    await create_invoice_and_send(query, user_id, amount, context)
+        with open(DONATIONS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
 
-async def create_invoice_and_send(query, user_id, amount, context):
-    try:
-        invoice_link = await context.bot.create_invoice_link(
-            title="Донат в Folk Valley Bot",
-            description=f"Пожертвование {amount} звёзд",
-            payload=f"donation_{user_id}_{amount}_{int(time.time())}",
-            provider_token="",
-            currency="XTR",
-            prices=[{"label": f"{amount} звёзд", "amount": amount}]
-        )
-        await query.edit_message_text(
-            f"🌟 **Ссылка на оплату создана!**\n\n"
-            f"Сумма: **{amount} звёзд**\n"
-            f"Нажми на кнопку ниже, чтобы оплатить:\n\n"
-            f"[Оплатить {amount} звёзд]({invoice_link})",
-            parse_mode="Markdown",
-            disable_web_page_preview=True
-        )
-    except Exception as e:
-        await query.edit_message_text(f"❌ Ошибка создания счёта: {e}")
+def save_donations(donations):
+    with open(DONATIONS_FILE, "w", encoding="utf-8") as f:
+        json.dump(donations, f, ensure_ascii=False, indent=2)
 
-async def handle_donation_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает ввод своей суммы для доната."""
-    user_id = update.effective_user.id
-    if user_id not in DONATION_INPUT:
-        return
-    
-    del DONATION_INPUT[user_id]
-    
-    try:
-        amount = int(update.message.text.strip())
-        if amount <= 0:
-            await update.message.reply_text("❌ Сумма должна быть положительным числом!")
-            return
-    except:
-        await update.message.reply_text("❌ Введи целое число (например, 150).")
-        return
-    
-    try:
-        invoice_link = await context.bot.create_invoice_link(
-            title="Донат в Folk Valley Bot",
-            description=f"Пожертвование {amount} звёзд",
-            payload=f"donation_{user_id}_{amount}_{int(time.time())}",
-            provider_token="",
-            currency="XTR",
-            prices=[{"label": f"{amount} звёзд", "amount": amount}]
-        )
-        await update.message.reply_text(
-            f"🌟 **Ссылка на оплату создана!**\n\n"
-            f"Сумма: **{amount} звёзд**\n"
-            f"Нажми на кнопку ниже, чтобы оплатить:\n\n"
-            f"[Оплатить {amount} звёзд]({invoice_link})",
-            parse_mode="Markdown",
-            disable_web_page_preview=True
-        )
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка создания счёта: {e}")
-
-async def payment_successful(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает успешную оплату."""
-    message = update.message
-    payment = message.successful_payment
-    if not payment:
-        return
-    
-    user_id = update.effective_user.id
-    amount = payment.total_amount
-    
-    add_donation(user_id, amount)
-    
-    await message.reply_text(
-        f"🌟 **Спасибо за донат!**\n\n"
-        f"Ты пожертвовал **{amount} звёзд**.\n"
-        f"Твой вклад помогает боту развиваться! 🙌",
-        parse_mode="Markdown"
-    )
+def add_donation(user_id, amount):
+    donations = load_donations()
+    user_id_str = str(user_id)
+    if user_id_str not in donations:
+        donations[user_id_str] = {"total": 0, "count": 0, "last": None}
+    donations[user_id_str]["total"] += amount
+    donations[user_id_str]["count"] += 1
+    donations[user_id_str]["last"] = datetime.now().isoformat()
+    save_donations(donations)
 
 # ==================== СЛОВА ДЛЯ /sosat ====================
 RANDOM_WORDS = [
@@ -430,7 +314,7 @@ ANIMALS = [
     {"name": "Крокодил", "emoji": "🐊", "description": "Ты — крокодил! Ты скрываешь свои эмоции, но внутри ты эмоциональный и иногда пускаешь слезу."},
 ]
 
-# ==================== СТИКЕРЫ (ВСТАВЬ СВОИ) ====================
+# ==================== СТИКЕРЫ (ПУСТО - ВСТАВЬ СВОИ) ====================
 ALL_STICKERS = [
     "CAACAgIAAxUAAWokXU38_MuMDT7hhvRuZctYuCKJAALIoAACX-ToSLg5DDhF1X44OwQ",
     "CAACAgIAAxUAAWokXU3n6LDpd626aZfX7VT1CippAAKapAAC1p_wSAAByejMhUYpHjsE",
@@ -774,7 +658,6 @@ bred_stickers = [
     "CAACAgIAAxUAAWokZOqiAXiA3711Q_TyiPhyFzALAALakwACwD55SBox3domPjGROwQ",
     "CAACAgIAAxUAAWokZOrG40e6MTW66zTsxm4Z-loOAAJOmAACHOB4SE3Urosl5Hw4OwQ",
 ]
-
 # ==================== СЛОВАРИ ====================
 cooldowns_folk = {}
 cooldowns_litvin = {}
@@ -946,7 +829,6 @@ async def auto_end_game(chat_id, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== ДОНАТЫ ====================
 async def donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /donate — создание доната через Telegram Stars (только в ЛС)."""
     if update.effective_chat.type != "private":
         await update.message.reply_text("❌ Эта команда доступна только в личных сообщениях!")
         return
@@ -984,7 +866,6 @@ async def donate_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     amount = None
     
     if data == "donate_custom":
-        # Ожидаем ввод суммы
         DONATION_INPUT[user_id] = True
         await query.edit_message_text(
             "✏️ **Введи свою сумму в звёздах** (целое число, например, 150).\n"
@@ -993,29 +874,24 @@ async def donate_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Извлекаем сумму из callback_data
     try:
         amount = int(data.split("_")[1])
     except:
         await query.edit_message_text("❌ Ошибка! Попробуй снова.")
         return
     
-    # Создаём инвойс
-    await create_invoice_and_send(query, user_id, amount)
+    await create_invoice_and_send(query, user_id, amount, context)
 
-async def create_invoice_and_send(query, user_id, amount):
+async def create_invoice_and_send(query, user_id, amount, context):
     try:
-        # Создаём ссылку на оплату
-        invoice_link = await query.bot.create_invoice_link(
+        invoice_link = await context.bot.create_invoice_link(
             title="Донат в Folk Valley Bot",
             description=f"Пожертвование {amount} звёзд",
             payload=f"donation_{user_id}_{amount}_{int(time.time())}",
-            provider_token="",  # Для XTR не нужен
+            provider_token="",
             currency="XTR",
             prices=[{"label": f"{amount} звёзд", "amount": amount}]
         )
-        
-        # Отправляем ссылку
         await query.edit_message_text(
             f"🌟 **Ссылка на оплату создана!**\n\n"
             f"Сумма: **{amount} звёзд**\n"
@@ -1028,12 +904,10 @@ async def create_invoice_and_send(query, user_id, amount):
         await query.edit_message_text(f"❌ Ошибка создания счёта: {e}")
 
 async def handle_donation_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает ввод своей суммы для доната."""
     user_id = update.effective_user.id
     if user_id not in DONATION_INPUT:
         return
     
-    # Удаляем флаг ожидания
     del DONATION_INPUT[user_id]
     
     try:
@@ -1045,9 +919,6 @@ async def handle_donation_input(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("❌ Введи целое число (например, 150).")
         return
     
-    # Создаём инвойс
-    # Используем chat_id для отправки
-    chat_id = update.effective_chat.id
     try:
         invoice_link = await context.bot.create_invoice_link(
             title="Донат в Folk Valley Bot",
@@ -1069,19 +940,16 @@ async def handle_donation_input(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text(f"❌ Ошибка создания счёта: {e}")
 
 async def payment_successful(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает успешную оплату."""
     message = update.message
     payment = message.successful_payment
     if not payment:
         return
     
     user_id = update.effective_user.id
-    amount = payment.total_amount  # в звёздах
+    amount = payment.total_amount
     
-    # Добавляем донат в базу
     add_donation(user_id, amount)
     
-    # Благодарим пользователя
     await message.reply_text(
         f"🌟 **Спасибо за донат!**\n\n"
         f"Ты пожертвовал **{amount} звёзд**.\n"
@@ -1091,7 +959,6 @@ async def payment_successful(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ==================== АДМИН-КОМАНДЫ ====================
 async def chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает список сохранённых чатов (только для админа)."""
     user = update.effective_user
     if user.id != ADMIN_ID:
         await update.message.reply_text("❌ У тебя нет прав для этой команды!")
@@ -1132,7 +999,6 @@ async def chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(result, parse_mode="Markdown")
 
 async def go(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Запускает рассылку по всем сохранённым чатам (только для админа)."""
     user = update.effective_user
     if user.id != ADMIN_ID:
         await update.message.reply_text("❌ У тебя нет прав для этой команды!")
@@ -1198,7 +1064,6 @@ async def go(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await status_msg.edit_text(result_text, parse_mode="Markdown")
 
 async def donate_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Рассылка всем донатерам (только для админа)."""
     user = update.effective_user
     if user.id != ADMIN_ID:
         await update.message.reply_text("❌ У тебя нет прав для этой команды!")
@@ -1244,7 +1109,6 @@ async def donate_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def donates(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает статистику донатов (только для админа)."""
     user = update.effective_user
     if user.id != ADMIN_ID:
         await update.message.reply_text("❌ У тебя нет прав для этой команды!")
@@ -1255,7 +1119,6 @@ async def donates(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 Пока нет донатов!")
         return
     
-    # Сортируем по сумме
     sorted_donations = sorted(
         donations.items(),
         key=lambda x: x[1]["total"],
@@ -2200,4 +2063,4 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    main() 
