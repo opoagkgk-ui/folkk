@@ -49,10 +49,8 @@ FONT_URLS = [
 FONT_PATH = "Impact.ttf"
 
 def download_font():
-    """Скачивает шрифт Impact.ttf из интернета, если его нет."""
     if os.path.exists(FONT_PATH):
         return True
-    
     for url in FONT_URLS:
         try:
             print(f"📥 Пытаемся скачать шрифт с {url}...")
@@ -65,35 +63,29 @@ def download_font():
         except Exception as e:
             print(f"⚠️ Не удалось загрузить с {url}: {e}")
             continue
-    
     print("❌ Не удалось скачать шрифт Impact, будет использован запасной шрифт.")
     return False
 
 def get_impact_font(size):
-    """Возвращает шрифт Impact или запасной."""
     if not os.path.exists(FONT_PATH):
         download_font()
-    
     paths = [
         FONT_PATH,
         "/app/shared/Impact.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
     ]
-    
     for path in paths:
         if os.path.exists(path):
             try:
                 return ImageFont.truetype(path, size)
             except:
                 continue
-    
     return ImageFont.load_default().font_variant(size=size)
 
 # ==================== СОХРАНЕНИЕ ЧАТОВ ====================
 CHATS_DB_FILE = "all_chats.json"
 DONATIONS_FILE = "donations.json"
-DONATION_INPUT = {}  # {user_id: True} для ожидания ввода своей суммы
 
 def save_chat_id(chat_id):
     try:
@@ -127,6 +119,12 @@ def add_donation(user_id, amount):
     donations[user_id_str]["count"] += 1
     donations[user_id_str]["last"] = datetime.now().isoformat()
     save_donations(donations)
+
+# Для временных сумм при выборе "Своя сумма"
+temp_donation_amounts = {}  # {user_id: int}
+
+# Ожидание рассылки
+pending_broadcast_all = {}  # {user_id: True}
 
 # ==================== СЛОВА ДЛЯ /sosat ====================
 RANDOM_WORDS = [
@@ -657,7 +655,8 @@ bred_stickers = [
     "CAACAgIAAxUAAWokZOpsqDAdFQ6r8cerAAHKHqhHgQACUYwAAvpheUjgqXeeJFOeoTsE",
     "CAACAgIAAxUAAWokZOqiAXiA3711Q_TyiPhyFzALAALakwACwD55SBox3domPjGROwQ",
     "CAACAgIAAxUAAWokZOrG40e6MTW66zTsxm4Z-loOAAJOmAACHOB4SE3Urosl5Hw4OwQ",
-]
+                ]
+
 # ==================== СЛОВАРИ ====================
 cooldowns_folk = {}
 cooldowns_litvin = {}
@@ -863,23 +862,88 @@ async def donate_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = query.from_user.id
     data = query.data
-    amount = None
     
     if data == "donate_custom":
-        DONATION_INPUT[user_id] = True
+        temp_donation_amounts[user_id] = 0
         await query.edit_message_text(
-            "✏️ **Введи свою сумму в звёздах** (целое число, например, 150).\n"
-            "Просто напиши число в чат.",
+            "✏️ **Настрой сумму доната:**\n\n"
+            f"💰 Текущая сумма: **0 звёзд**\n\n"
+            "Используй кнопки ниже для изменения суммы.\n"
+            "Когда будет готово, нажми «Отправить».",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("➕ +5", callback_data="donate_adj_+5"),
+                    InlineKeyboardButton("➕ +10", callback_data="donate_adj_+10"),
+                ],
+                [
+                    InlineKeyboardButton("➖ -5", callback_data="donate_adj_-5"),
+                    InlineKeyboardButton("➖ -10", callback_data="donate_adj_-10"),
+                ],
+                [
+                    InlineKeyboardButton("✅ Отправить", callback_data="donate_send"),
+                    InlineKeyboardButton("❌ Отменить", callback_data="donate_cancel"),
+                ],
+            ]),
             parse_mode="Markdown"
         )
         return
     
+    # Обработка кнопок изменения суммы
+    if data.startswith("donate_adj_"):
+        if user_id not in temp_donation_amounts:
+            await query.edit_message_text("❌ Ошибка. Начни заново с /donate")
+            return
+        delta = int(data.split("_")[-1])
+        new_amount = temp_donation_amounts[user_id] + delta
+        if new_amount < 0:
+            new_amount = 0
+        temp_donation_amounts[user_id] = new_amount
+        await query.edit_message_text(
+            f"✏️ **Настрой сумму доната:**\n\n"
+            f"💰 Текущая сумма: **{new_amount} звёзд**\n\n"
+            "Используй кнопки ниже для изменения суммы.\n"
+            "Когда будет готово, нажми «Отправить».",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("➕ +5", callback_data="donate_adj_+5"),
+                    InlineKeyboardButton("➕ +10", callback_data="donate_adj_+10"),
+                ],
+                [
+                    InlineKeyboardButton("➖ -5", callback_data="donate_adj_-5"),
+                    InlineKeyboardButton("➖ -10", callback_data="donate_adj_-10"),
+                ],
+                [
+                    InlineKeyboardButton("✅ Отправить", callback_data="donate_send"),
+                    InlineKeyboardButton("❌ Отменить", callback_data="donate_cancel"),
+                ],
+            ]),
+            parse_mode="Markdown"
+        )
+        return
+    
+    if data == "donate_cancel":
+        if user_id in temp_donation_amounts:
+            del temp_donation_amounts[user_id]
+        await query.edit_message_text("❌ Отменено.")
+        return
+    
+    if data == "donate_send":
+        if user_id not in temp_donation_amounts:
+            await query.edit_message_text("❌ Ошибка. Начни заново с /donate")
+            return
+        amount = temp_donation_amounts.pop(user_id)
+        if amount <= 0:
+            await query.edit_message_text("❌ Сумма должна быть больше 0 звёзд!")
+            return
+        await create_invoice_and_send(query, user_id, amount, context)
+        return
+    
+    # Обработка пресетов
     try:
         amount = int(data.split("_")[1])
     except:
         await query.edit_message_text("❌ Ошибка! Попробуй снова.")
         return
-    
     await create_invoice_and_send(query, user_id, amount, context)
 
 async def create_invoice_and_send(query, user_id, amount, context):
@@ -903,42 +967,6 @@ async def create_invoice_and_send(query, user_id, amount, context):
     except Exception as e:
         await query.edit_message_text(f"❌ Ошибка создания счёта: {e}")
 
-async def handle_donation_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in DONATION_INPUT:
-        return
-    
-    del DONATION_INPUT[user_id]
-    
-    try:
-        amount = int(update.message.text.strip())
-        if amount <= 0:
-            await update.message.reply_text("❌ Сумма должна быть положительным числом!")
-            return
-    except:
-        await update.message.reply_text("❌ Введи целое число (например, 150).")
-        return
-    
-    try:
-        invoice_link = await context.bot.create_invoice_link(
-            title="Донат в Folk Valley Bot",
-            description=f"Пожертвование {amount} звёзд",
-            payload=f"donation_{user_id}_{amount}_{int(time.time())}",
-            provider_token="",
-            currency="XTR",
-            prices=[{"label": f"{amount} звёзд", "amount": amount}]
-        )
-        await update.message.reply_text(
-            f"🌟 **Ссылка на оплату создана!**\n\n"
-            f"Сумма: **{amount} звёзд**\n"
-            f"Нажми на кнопку ниже, чтобы оплатить:\n\n"
-            f"[Оплатить {amount} звёзд]({invoice_link})",
-            parse_mode="Markdown",
-            disable_web_page_preview=True
-        )
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка создания счёта: {e}")
-
 async def payment_successful(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     payment = message.successful_payment
@@ -961,42 +989,102 @@ async def payment_successful(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id != ADMIN_ID:
-        await update.message.reply_text("❌ У тебя нет прав для этой команды!")
+        await update.message.reply_text("❌ Нет прав!")
         return
     
     try:
         with open(CHATS_DB_FILE, "r", encoding="utf-8") as f:
             chat_ids = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        await update.message.reply_text("📭 Нет сохранённых чатов!")
+        await update.message.reply_text("📭 Нет сохранённых чатов.")
         return
     
     if not chat_ids:
-        await update.message.reply_text("📭 Список чатов пуст!")
+        await update.message.reply_text("📭 Список чатов пуст.")
         return
     
     result = f"📊 **Всего чатов:** {len(chat_ids)}\n\n"
-    
     for chat_id in chat_ids[:20]:
-        try:
-            url = f"https://api.telegram.org/bot{TOKEN}/getChat"
-            response = requests.get(url, params={"chat_id": chat_id}, timeout=10)
-            data = response.json()
-            if data.get("ok"):
-                chat = data["result"]
-                chat_type = chat.get("type", "unknown")
-                name = chat.get("title") or chat.get("first_name") or "Без названия"
-                emoji = "👤" if chat_type == "private" else "👥"
-                result += f"{emoji} `{chat_id}` — {name}\n"
-            else:
-                result += f"`{chat_id}`\n"
-        except:
-            result += f"`{chat_id}`\n"
-    
+        result += f"`{chat_id}`\n"
     if len(chat_ids) > 20:
         result += f"\n... и ещё {len(chat_ids) - 20} чатов"
     
-    await update.message.reply_text(result, parse_mode="Markdown")
+    kb = [[InlineKeyboardButton("📨 Разослать всем", callback_data="broadcast_all")]]
+    await update.message.reply_text(
+        result,
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="Markdown"
+    )
+
+async def broadcast_all_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    if user_id != ADMIN_ID:
+        await query.edit_message_text("❌ Нет прав!")
+        return
+    
+    pending_broadcast_all[user_id] = True
+    await query.edit_message_text(
+        "✏️ **Введи текст для рассылки во все чаты.**\n"
+        "Просто напиши сообщение.\n"
+        "Чтобы отменить — напиши /cancel.",
+        parse_mode="Markdown"
+    )
+
+async def handle_broadcast_all_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        return
+    
+    if user_id not in pending_broadcast_all:
+        return
+    
+    del pending_broadcast_all[user_id]
+    text = update.message.text.strip()
+    if not text:
+        await update.message.reply_text("❌ Пустое сообщение. Отменено.")
+        return
+    
+    try:
+        with open(CHATS_DB_FILE, "r", encoding="utf-8") as f:
+            chat_ids = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        await update.message.reply_text("❌ Нет сохранённых чатов!")
+        return
+    
+    if not chat_ids:
+        await update.message.reply_text("❌ Список чатов пуст!")
+        return
+    
+    status_msg = await update.message.reply_text(f"🚀 Начинаю рассылку в {len(chat_ids)} чатов...")
+    
+    sent = 0
+    failed = 0
+    for chat_id in chat_ids:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+            sent += 1
+        except:
+            failed += 1
+        time.sleep(0.3)
+    
+    await status_msg.edit_text(
+        f"✅ **Рассылка завершена!**\n\n"
+        f"📤 Отправлено: {sent}\n"
+        f"❌ Ошибок: {failed}\n"
+        f"📊 Всего чатов: {len(chat_ids)}",
+        parse_mode="Markdown"
+    )
+
+async def cancel_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id in pending_broadcast_all:
+        del pending_broadcast_all[user_id]
+        await update.message.reply_text("❌ Отменено.")
+    else:
+        await update.message.reply_text("Нет активной рассылки.")
 
 async def go(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -1027,41 +1115,21 @@ async def go(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     sent = 0
     failed = 0
-    failed_chats = []
-    
     for chat_id in chat_ids:
         try:
-            send_url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-            payload = {
-                "chat_id": chat_id,
-                "text": text,
-                "disable_notification": True,
-                "parse_mode": "Markdown"
-            }
-            response = requests.post(send_url, json=payload, timeout=15)
-            if response.status_code == 200:
-                sent += 1
-            else:
-                failed += 1
-                failed_chats.append(chat_id)
-        except Exception:
+            await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+            sent += 1
+        except:
             failed += 1
-            failed_chats.append(chat_id)
         time.sleep(0.3)
     
-    result_text = (
+    await status_msg.edit_text(
         f"✅ **Рассылка завершена!**\n\n"
         f"📤 Отправлено: {sent}\n"
         f"❌ Ошибок: {failed}\n"
-        f"📊 Всего чатов: {len(chat_ids)}"
+        f"📊 Всего чатов: {len(chat_ids)}",
+        parse_mode="Markdown"
     )
-    
-    if failed_chats:
-        result_text += f"\n\n❌ Чаты с ошибками:\n`{', '.join(map(str, failed_chats[:10]))}`"
-        if len(failed_chats) > 10:
-            result_text += f"\n... и ещё {len(failed_chats) - 10} чатов"
-    
-    await status_msg.edit_text(result_text, parse_mode="Markdown")
 
 async def donate_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -1087,14 +1155,9 @@ async def donate_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     sent = 0
     failed = 0
-    
     for uid in user_ids:
         try:
-            await context.bot.send_message(
-                chat_id=uid,
-                text=text,
-                parse_mode="Markdown"
-            )
+            await context.bot.send_message(chat_id=uid, text=text, parse_mode="Markdown")
             sent += 1
         except:
             failed += 1
@@ -1863,7 +1926,7 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE,
 # ==================== ТРИГГЕРЫ ====================
 async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
-    if not message.text:
+    if not message or not message.text:
         return
     
     text = message.text.strip()
@@ -2046,9 +2109,9 @@ def main():
     app.add_handler(CommandHandler("donate", donate))
     app.add_handler(CommandHandler("donates", donates))
     app.add_handler(CommandHandler("donate_broadcast", donate_broadcast))
+    app.add_handler(CommandHandler("cancel", cancel_broadcast))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_triggers))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_donation_input))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, payment_successful))
     app.add_handler(InlineQueryHandler(inline_query))
     app.add_handler(CallbackQueryHandler(cd_button, pattern="^cd:"))
@@ -2056,6 +2119,8 @@ def main():
     app.add_handler(CallbackQueryHandler(game_callback, pattern="^game_stop:"))
     app.add_handler(CallbackQueryHandler(game_rps_callback, pattern="^game_rps:"))
     app.add_handler(CallbackQueryHandler(donate_callback, pattern="^donate_"))
+    app.add_handler(CallbackQueryHandler(broadcast_all_callback, pattern="^broadcast_all$"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), handle_broadcast_all_input))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cd_input))
 
     threading.Thread(target=run_flask, daemon=True).start()
