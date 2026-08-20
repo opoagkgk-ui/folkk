@@ -43,41 +43,58 @@ IMGBB_API_KEY = "2bbaa8526b22fc8d7930403e13dbbdcd"
 UNSPLASH_ACCESS_KEY = "VTNenGnCKKbtcMddc_oN6qg5AGpmEXKUMDHK99qkbiA"
 
 # ==================== ШРИФТ С АВТО-ЗАГРУЗКОЙ ====================
-FONT_URL = "https://github.com/WebPlatformForEmbedded/Fonts/raw/master/Impact.ttf"
+FONT_URLS = [
+    "https://raw.githubusercontent.com/ArtifexSoftware/urw-base35-fonts/master/Impact.ttf",
+    "https://github.com/ArtifexSoftware/urw-base35-fonts/raw/master/Impact.ttf",
+    "https://raw.githubusercontent.com/paulgessinger/impact/master/Impact.ttf",  # может не работать
+]
 FONT_PATH = "Impact.ttf"
 
 def download_font():
+    """Скачивает шрифт Impact.ttf из интернета, если его нет."""
     if os.path.exists(FONT_PATH):
         return True
-    try:
-        print("📥 Скачиваем шрифт Impact...")
-        response = requests.get(FONT_URL, timeout=30)
-        response.raise_for_status()
-        with open(FONT_PATH, "wb") as f:
-            f.write(response.content)
-        print("✅ Шрифт Impact успешно загружен!")
-        return True
-    except Exception as e:
-        print(f"❌ Ошибка загрузки шрифта: {e}")
-        return False
+    
+    for url in FONT_URLS:
+        try:
+            print(f"📥 Пытаемся скачать шрифт с {url}...")
+            response = requests.get(url, timeout=30)
+            if response.status_code == 200:
+                with open(FONT_PATH, "wb") as f:
+                    f.write(response.content)
+                print("✅ Шрифт Impact успешно загружен!")
+                return True
+        except Exception as e:
+            print(f"⚠️ Не удалось загрузить с {url}: {e}")
+            continue
+    
+    print("❌ Не удалось скачать шрифт Impact, будет использован запасной шрифт.")
+    return False
 
 def get_impact_font(size):
+    """Возвращает шрифт Impact или запасной."""
+    # Сначала пробуем загрузить
     if not os.path.exists(FONT_PATH):
         download_font()
+    
     paths = [
         FONT_PATH,
-        "/app/shared/Impact.ttf",
+        "/app/shared/Impact.ttf",          # если ты загрузишь вручную
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/msttcorefonts/Impact.ttf",  # если установлен пакет msttcorefonts
     ]
+    
     for path in paths:
         if os.path.exists(path):
             try:
                 return ImageFont.truetype(path, size)
             except:
                 continue
+    
+    # Если ничего не найдено — используем встроенный шрифт PIL
     return ImageFont.load_default().font_variant(size=size)
-
+    
 # ==================== СОХРАНЕНИЕ ЧАТОВ ====================
 CHATS_DB_FILE = "all_chats.json"
 DONATIONS_FILE = "donations.json"
@@ -85,7 +102,7 @@ DONATION_INPUT = {}  # {user_id: True} для ожидания ввода сво
 
 def save_chat_id(chat_id):
     try:
-        with open(CHATS_DB_FILE, "r", encoding="utf-8") as f:
+        with open(CHATS_B_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         data = []
