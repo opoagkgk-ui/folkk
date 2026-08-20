@@ -1459,20 +1459,107 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for dx, dy in [(-2, -2), (-2, 0), (-2, 2), (0, -2), (0, 2), (2, -2), (2, 0), (2, 2)]:
                 draw.text((x + dx, y + dy), line, font=font, fill="black")
             
-            draw.text((x, y), line, font=font, fill="white")
-            y += line_heights[i]
+async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_chat_id(update.effective_chat.id)
+    add_activity(update.effective_chat.id, update.effective_user.id)
+    message = update.message
 
-    draw_text_with_outline(top_text, 10, is_top=True)
-    
-    if bottom_text:
-        draw_text_with_outline(bottom_text, height - 10, is_top=False)
+    if not message.photo and not (message.reply_to_message and message.reply_to_message.photo):
+        await message.reply_text("📸 Отправь фото с подписью /zabava текст или ответь командой на фото.")
+        return
 
-    output = io.BytesIO()
-    image.save(output, format="JPEG", quality=92)
-    output.seek(0)
-    
-    await message.reply_photo(photo=output, caption="🎭 Твой мем готов!")
+    args = context.args
+    if not args:
+        await message.reply_text(
+            "❌ Напиши текст.\n\n"
+            "Примеры:\n"
+            "/zabava 1 Текст сверху\n"
+            "/zabava 2 Текст снизу\n"
+            "/zabava 1 Верхний 2 Нижний\n"
+            "Если без цифр, текст будет сверху."
+        )
+        return
 
+    # Парсим текст с маркерами 1 и 2
+    try:
+        idx1 = args.index("1")
+    except ValueError:
+        idx1 = -1
+    try:
+        idx2 = args.index("2")
+    except ValueError:
+        idx2 = -1
+
+    top_text = ""
+    bottom_text = ""
+
+    if idx1 == -1 and idx2 == -1:
+        top_text = " ".join(args).strip()
+    else:
+        if idx1 != -1:
+            if idx2 != -1 and idx2 > idx1:
+                top_parts = args[idx1+1:idx2]
+            else:
+                top_parts = args[idx1+1:]
+            top_text = " ".join(top_parts).strip()
+        if idx2 != -1:
+            if idx1 != -1 and idx1 > idx2:
+                bottom_parts = args[idx2+1:idx1]
+            else:
+                bottom_parts = args[idx2+1:]
+            bottom_text = " ".join(bottom_parts).strip()
+
+    if not top_text and not bottom_text:
+        await message.reply_text("❌ Текст не распознан. Пример: /zabava 1 Привет 2 Мир")
+        return
+
+    # Скачиваем фото
+    if message.photo:
+        file_id = message.photo[-1].file_id
+    else:
+        file_id = message.reply_to_message.photo[-1].file_id
+
+    try:
+        file = await context.bot.get_file(file_id)
+        img_bytes = io.BytesIO()
+        await file.download_to_memory(img_bytes)
+        img_bytes.seek(0)
+        image_data = img_bytes.read()
+    except Exception as e:
+        await message.reply_text(f"❌ Ошибка загрузки фото: {e}")
+        return
+
+    # Загружаем на ImgBB
+    loop = asyncio.get_event_loop()
+    try:
+        photo_url = await loop.run_in_executor(None, upload_to_imgbb, image_data)
+        if not photo_url:
+            await message.reply_text("❌ Не удалось загрузить фото на хостинг (ImgBB).")
+            return
+    except Exception as e:
+        await message.reply_text(f"❌ Ошибка загрузки на хостинг: {e}")
+        return
+
+    # Кодируем текст и фон
+    top_enc = urllib.parse.quote(top_text if top_text else "_")
+    bottom_enc = urllib.parse.quote(bottom_text if bottom_text else "_")
+    bg_enc = urllib.parse.quote(photo_url)
+
+    # Формируем URL для memegen.link (шрифт Impact, сохраняем регистр)
+    url = f"https://api.memegen.link/images/custom/{top_enc}/{bottom_enc}.png?background={bg_enc}&font=impact"
+
+    # Заголовки, чтобы избежать 415 ошибки
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        response = await loop.run_in_executor(None, lambda: requests.get(url, headers=headers, timeout=30))
+        if response.status_code != 200:
+            await message.reply_text(f"❌ Ошибка генерации мема: {response.status_code}")
+            return
+        meme_bytes = response.content
+        await message.reply_photo(photo=meme_bytes, caption="🎭 Твой мем готов!")
+    except Exception as e:
+        await message.reply_text(f"❌ Ошибка при создании мема: {e}")
+        
 # ==================== /search ====================
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_chat_id(update.effective_chat.id)
