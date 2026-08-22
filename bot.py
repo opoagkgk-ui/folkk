@@ -120,11 +120,30 @@ def add_donation(user_id, amount):
     donations[user_id_str]["last"] = datetime.now().isoformat()
     save_donations(donations)
 
-# Для временных сумм при выборе "Своя сумма"
-temp_donation_amounts = {}  # {user_id: int}
+# Для донатов (своя сумма)
+temp_donation_amounts = {}
 
 # Ожидание рассылки
-pending_broadcast_all = {}  # {user_id: True}
+pending_broadcast_all = {}
+
+# ==================== ВОПРОСЫ ДЛЯ /spin ====================
+SPIN_QUESTIONS = [
+    "Какая самая странная еда, которую ты пробовал?",
+    "Если бы ты мог выбрать суперспособность, которая была бы абсолютно бесполезной — какую бы выбрал?",
+    "Что бы ты делал, если бы на 24 часа стал невидимым?",
+    "Какая самая глупая вещь, которую ты делал на камеру?",
+    "Если бы ты мог говорить с животными, что бы спросил у своего питомца?",
+    "Какая твоя самая неловкая ситуация в школе/на работе?",
+    "Если бы ты был героем фильма, какой бы это был фильм?",
+    "Какой самый странный сон ты видел?",
+    "Что бы ты спросил у инопланетян, если бы они прилетели?",
+    "Если бы ты мог отменить один закон в мире, какой бы это был закон?",
+    "Какая самая смешная шутка, которую ты слышал?",
+    "Если бы ты мог жить в любой эпохе, какую бы выбрал?",
+    "Что бы ты делал, если бы выиграл в лотерею 10 миллионов?",
+    "Какой твой самый стыдный момент в интернете?",
+    "Если бы ты мог поменяться жизнью с любым человеком, с кем бы поменялся?",
+]
 
 # ==================== СЛОВА ДЛЯ /sosat ====================
 RANDOM_WORDS = [
@@ -655,7 +674,7 @@ bred_stickers = [
     "CAACAgIAAxUAAWokZOpsqDAdFQ6r8cerAAHKHqhHgQACUYwAAvpheUjgqXeeJFOeoTsE",
     "CAACAgIAAxUAAWokZOqiAXiA3711Q_TyiPhyFzALAALakwACwD55SBox3domPjGROwQ",
     "CAACAgIAAxUAAWokZOrG40e6MTW66zTsxm4Z-loOAAJOmAACHOB4SE3Urosl5Hw4OwQ",
-                ]
+]
 
 # ==================== СЛОВАРИ ====================
 cooldowns_folk = {}
@@ -888,7 +907,6 @@ async def donate_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Обработка кнопок изменения суммы
     if data.startswith("donate_adj_"):
         if user_id not in temp_donation_amounts:
             await query.edit_message_text("❌ Ошибка. Начни заново с /donate")
@@ -938,7 +956,6 @@ async def donate_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await create_invoice_and_send(query, user_id, amount, context)
         return
     
-    # Обработка пресетов
     try:
         amount = int(data.split("_")[1])
     except:
@@ -984,6 +1001,111 @@ async def payment_successful(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"Твой вклад помогает боту развиваться! 🙌",
         parse_mode="Markdown"
     )
+
+# ==================== НОВЫЕ КОМАНДЫ: /spin и /offer ====================
+async def spin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Чат-рулетка: выбирает случайного участника и задаёт вопрос."""
+    chat = update.effective_chat
+    if chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text("🎲 Эта команда работает только в группах!")
+        return
+    
+    # Получаем список участников (до 200)
+    try:
+        members = await context.bot.get_chat_members(chat.id, limit=200)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Не могу получить список участников: {e}")
+        return
+    
+    if not members:
+        await update.message.reply_text("❌ В чате нет участников!")
+        return
+    
+    # Выбираем случайного участника (исключаем бота)
+    bot_id = context.bot.id
+    valid_members = [m for m in members if m.user.id != bot_id]
+    if not valid_members:
+        await update.message.reply_text("❌ Нет участников, кроме бота!")
+        return
+    
+    target = random.choice(valid_members).user
+    question = random.choice(SPIN_QUESTIONS)
+    
+    await update.message.reply_text(
+        f"🎲 **Чат-рулетка!**\n\n"
+        f"👤 Выпал: @{target.username if target.username else target.first_name}\n"
+        f"❓ Вопрос: **{question}**",
+        parse_mode="Markdown"
+    )
+
+async def offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Предложка: отправляет идею админу (только в ЛС)."""
+    if update.effective_chat.type != "private":
+        await update.message.reply_text("❌ Эта команда доступна только в личных сообщениях!")
+        return
+    
+    text = " ".join(context.args) if context.args else ""
+    if not text:
+        await update.message.reply_text(
+            "❌ Напиши свою идею после команды:\n`/offer Идея для бота`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    user = update.effective_user
+    user_id = user.id
+    user_name = f"@{user.username}" if user.username else user.first_name
+    
+    # Отправляем админу
+    kb = [
+        [
+            InlineKeyboardButton("✅ Принять", callback_data=f"offer_accept_{user_id}"),
+            InlineKeyboardButton("❌ Отклонить", callback_data=f"offer_reject_{user_id}"),
+        ]
+    ]
+    
+    await context.bot.send_message(
+        chat_id=ADMIN_ID,
+        text=f"📩 **Новая идея от {user_name}** (ID: `{user_id}`)\n\n{text}",
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="Markdown"
+    )
+    
+    await update.message.reply_text(
+        "✅ Твоя идея отправлена админу! Спасибо за вклад! 🙌"
+    )
+
+async def offer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик кнопок админа для предложки."""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id_from_callback = query.from_user.id
+    if user_id_from_callback != ADMIN_ID:
+        await query.answer("❌ Только админ может это делать!", show_alert=True)
+        return
+    
+    data = query.data
+    parts = data.split("_")
+    action = parts[1]  # accept или reject
+    target_user_id = int(parts[2])
+    
+    if action == "accept":
+        response_text = "🌟 **Спасибо за идею!** Возможно, ты увидишь её в следующем обновлении!"
+    else:
+        response_text = "❌ **Ваша идея отклонена.** Возможно, она не подходит по правилам или не по теме."
+    
+    try:
+        await context.bot.send_message(chat_id=target_user_id, text=response_text, parse_mode="Markdown")
+    except Exception as e:
+        logging.error(f"Не удалось отправить ответ пользователю {target_user_id}: {e}")
+    
+    # Удаляем кнопки у админа
+    await query.edit_message_text(
+        text=query.message.text + f"\n\n✅ {action.capitalize()} (ответ отправлен)",
+        reply_markup=None
+    )
+    await query.answer("✅ Готово!")
 
 # ==================== АДМИН-КОМАНДЫ ====================
 async def chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1252,7 +1374,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🎮 **Игры:**\n"
             "• `/game` — выбрать игру (угадай число, КНБ, викторина)\n"
             "• Для ответа используй `/answer` (только для создателя игры)\n"
-            "• `/top` — топ активных пользователей\n\n"
+            "• `/top` — топ активных пользователей\n"
+            "• `/spin` — чат-рулетка (только в группах)\n\n"
             "🐱 **Животные:**\n"
             "• `/cat` — случайный котик\n"
             "• `/dog` — случайная собачка\n"
@@ -1261,6 +1384,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• `/factme` — случайный факт о тебе\n\n"
             "🌟 **Донат:**\n"
             "• `/donate` — поддержать бота звёздами (только в ЛС)\n\n"
+            "📩 **Предложка:**\n"
+            "• `/offer` — отправить идею админу (только в ЛС)\n\n"
             "🎭 **Развлечения:**\n"
             "• `/folk`, `/litvin`, `/bred` — стикеры\n"
             "• `/sosat` — бессвязный бред\n"
@@ -1278,7 +1403,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
     else:
-        await update.message.reply_text("Я в группе! /folk /litvin /bred /sosat /zabava /search /voice /game /top /cat /dog /animal /factme /cooldown")
+        await update.message.reply_text("Я в группе! /folk /litvin /bred /sosat /zabava /search /voice /game /top /cat /dog /animal /factme /spin /cooldown")
 
 async def folk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_chat_id(update.effective_chat.id)
@@ -1459,107 +1584,20 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for dx, dy in [(-2, -2), (-2, 0), (-2, 2), (0, -2), (0, 2), (2, -2), (2, 0), (2, 2)]:
                 draw.text((x + dx, y + dy), line, font=font, fill="black")
             
-async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat_id(update.effective_chat.id)
-    add_activity(update.effective_chat.id, update.effective_user.id)
-    message = update.message
+            draw.text((x, y), line, font=font, fill="white")
+            y += line_heights[i]
 
-    if not message.photo and not (message.reply_to_message and message.reply_to_message.photo):
-        await message.reply_text("📸 Отправь фото с подписью /zabava текст или ответь командой на фото.")
-        return
+    draw_text_with_outline(top_text, 10, is_top=True)
+    
+    if bottom_text:
+        draw_text_with_outline(bottom_text, height - 10, is_top=False)
 
-    args = context.args
-    if not args:
-        await message.reply_text(
-            "❌ Напиши текст.\n\n"
-            "Примеры:\n"
-            "/zabava 1 Текст сверху\n"
-            "/zabava 2 Текст снизу\n"
-            "/zabava 1 Верхний 2 Нижний\n"
-            "Если без цифр, текст будет сверху."
-        )
-        return
+    output = io.BytesIO()
+    image.save(output, format="JPEG", quality=92)
+    output.seek(0)
+    
+    await message.reply_photo(photo=output, caption="🎭 Твой мем готов!")
 
-    # Парсим текст с маркерами 1 и 2
-    try:
-        idx1 = args.index("1")
-    except ValueError:
-        idx1 = -1
-    try:
-        idx2 = args.index("2")
-    except ValueError:
-        idx2 = -1
-
-    top_text = ""
-    bottom_text = ""
-
-    if idx1 == -1 and idx2 == -1:
-        top_text = " ".join(args).strip()
-    else:
-        if idx1 != -1:
-            if idx2 != -1 and idx2 > idx1:
-                top_parts = args[idx1+1:idx2]
-            else:
-                top_parts = args[idx1+1:]
-            top_text = " ".join(top_parts).strip()
-        if idx2 != -1:
-            if idx1 != -1 and idx1 > idx2:
-                bottom_parts = args[idx2+1:idx1]
-            else:
-                bottom_parts = args[idx2+1:]
-            bottom_text = " ".join(bottom_parts).strip()
-
-    if not top_text and not bottom_text:
-        await message.reply_text("❌ Текст не распознан. Пример: /zabava 1 Привет 2 Мир")
-        return
-
-    # Скачиваем фото
-    if message.photo:
-        file_id = message.photo[-1].file_id
-    else:
-        file_id = message.reply_to_message.photo[-1].file_id
-
-    try:
-        file = await context.bot.get_file(file_id)
-        img_bytes = io.BytesIO()
-        await file.download_to_memory(img_bytes)
-        img_bytes.seek(0)
-        image_data = img_bytes.read()
-    except Exception as e:
-        await message.reply_text(f"❌ Ошибка загрузки фото: {e}")
-        return
-
-    # Загружаем на ImgBB
-    loop = asyncio.get_event_loop()
-    try:
-        photo_url = await loop.run_in_executor(None, upload_to_imgbb, image_data)
-        if not photo_url:
-            await message.reply_text("❌ Не удалось загрузить фото на хостинг (ImgBB).")
-            return
-    except Exception as e:
-        await message.reply_text(f"❌ Ошибка загрузки на хостинг: {e}")
-        return
-
-    # Кодируем текст и фон
-    top_enc = urllib.parse.quote(top_text if top_text else "_")
-    bottom_enc = urllib.parse.quote(bottom_text if bottom_text else "_")
-    bg_enc = urllib.parse.quote(photo_url)
-
-    # Формируем URL для memegen.link (шрифт Impact, сохраняем регистр)
-    url = f"https://api.memegen.link/images/custom/{top_enc}/{bottom_enc}.png?background={bg_enc}&font=impact"
-
-    # Заголовки, чтобы избежать 415 ошибки
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        response = await loop.run_in_executor(None, lambda: requests.get(url, headers=headers, timeout=30))
-        if response.status_code != 200:
-            await message.reply_text(f"❌ Ошибка генерации мема: {response.status_code}")
-            return
-        meme_bytes = response.content
-        await message.reply_photo(photo=meme_bytes, caption="🎭 Твой мем готов!")
-    except Exception as e:
-        await message.reply_text(f"❌ Ошибка при создании мема: {e}")
-        
 # ==================== /search ====================
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_chat_id(update.effective_chat.id)
@@ -2197,6 +2235,8 @@ def main():
     app.add_handler(CommandHandler("donates", donates))
     app.add_handler(CommandHandler("donate_broadcast", donate_broadcast))
     app.add_handler(CommandHandler("cancel", cancel_broadcast))
+    app.add_handler(CommandHandler("spin", spin))
+    app.add_handler(CommandHandler("offer", offer))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_triggers))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, payment_successful))
@@ -2207,6 +2247,7 @@ def main():
     app.add_handler(CallbackQueryHandler(game_rps_callback, pattern="^game_rps:"))
     app.add_handler(CallbackQueryHandler(donate_callback, pattern="^donate_"))
     app.add_handler(CallbackQueryHandler(broadcast_all_callback, pattern="^broadcast_all$"))
+    app.add_handler(CallbackQueryHandler(offer_callback, pattern="^offer_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), handle_broadcast_all_input))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cd_input))
 
@@ -2215,4 +2256,4 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":
-    main() 
+    main()
