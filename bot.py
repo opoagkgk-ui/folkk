@@ -985,9 +985,12 @@ async def spin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
+        # Правильный способ для python-telegram-bot 20.x
         members = []
-        async for member in context.bot.get_chat_members(chat_id=chat.id, limit=200):
+        async for member in context.bot.get_chat_members(chat_id=chat.id):
             members.append(member)
+            if len(members) >= 200:
+                break
     except Exception as e:
         await update.message.reply_text(f"❌ Не могу получить список участников: {e}")
         return
@@ -996,6 +999,7 @@ async def spin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ В чате нет участников!")
         return
     
+    # Исключаем бота
     bot_id = context.bot.id
     valid_members = [m for m in members if m.user.id != bot_id]
     if not valid_members:
