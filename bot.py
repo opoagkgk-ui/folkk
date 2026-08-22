@@ -10,6 +10,7 @@ import threading
 import base64
 import aiohttp
 import time
+import shutil
 from collections import defaultdict
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
@@ -26,7 +27,6 @@ from telegram.ext import (
 )
 from deep_translator import GoogleTranslator
 from gtts import gTTS
-from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
 
 # ==================== ТОКЕН ИЗ ОКРУЖЕНИЯ ====================
@@ -41,52 +41,32 @@ MINI_APP_URL = "https://jalal-p7p9.onrender.com"
 IMGBB_API_KEY = "2bbaa8526b22fc8d7930403e13dbbdcd"
 UNSPLASH_ACCESS_KEY = "VTNenGnCKKbtcMddc_oN6qg5AGpmEXKUMDHK99qkbiA"
 
-# ==================== ШРИФТ С АВТО-ЗАГРУЗКОЙ ====================
-FONT_URLS = [
-    "https://raw.githubusercontent.com/ArtifexSoftware/urw-base35-fonts/master/Impact.ttf",
-    "https://github.com/ArtifexSoftware/urw-base35-fonts/raw/master/Impact.ttf",
-]
-FONT_PATH = "Impact.ttf"
+# ==================== ПУТИ К ФАЙЛАМ (в /app/shared) ====================
+CHATS_DB_FILE = "/app/shared/all_chats.json"
+DONATIONS_FILE = "/app/shared/donations.json"
+USER_STATS_FILE = "/app/shared/user_stats.json"
+USER_GROUPS_FILE = "/app/shared/user_groups.json"
+OFFER_RULES_URL = "https://telegra.ph/Pravila-otpravki-predlozhenij-08-22"  # Замени на свою ссылку
 
-def download_font():
-    if os.path.exists(FONT_PATH):
-        return True
-    for url in FONT_URLS:
-        try:
-            print(f"📥 Пытаемся скачать шрифт с {url}...")
-            response = requests.get(url, timeout=30)
-            if response.status_code == 200:
-                with open(FONT_PATH, "wb") as f:
-                    f.write(response.content)
-                print("✅ Шрифт Impact успешно загружен!")
-                return True
-        except Exception as e:
-            print(f"⚠️ Не удалось загрузить с {url}: {e}")
-            continue
-    print("❌ Не удалось скачать шрифт Impact, будет использован запасной шрифт.")
-    return False
-
-def get_impact_font(size):
-    if not os.path.exists(FONT_PATH):
-        download_font()
-    paths = [
-        FONT_PATH,
-        "/app/shared/Impact.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+# ==================== МИГРАЦИЯ ФАЙЛОВ ====================
+def migrate_files():
+    """Переносит существующие файлы из корня в /app/shared при первом запуске."""
+    os.makedirs("/app/shared", exist_ok=True)
+    files_to_migrate = [
+        ("all_chats.json", CHATS_DB_FILE),
+        ("donations.json", DONATIONS_FILE),
+        ("user_stats.json", USER_STATS_FILE),
+        ("user_groups.json", USER_GROUPS_FILE),
     ]
-    for path in paths:
-        if os.path.exists(path):
+    for src, dst in files_to_migrate:
+        if os.path.exists(src) and not os.path.exists(dst):
             try:
-                return ImageFont.truetype(path, size)
-            except:
-                continue
-    return ImageFont.load_default().font_variant(size=size)
+                shutil.copy2(src, dst)
+                print(f"✅ Перенесён {src} -> {dst}")
+            except Exception as e:
+                print(f"⚠️ Не удалось перенести {src}: {e}")
 
 # ==================== СОХРАНЕНИЕ ЧАТОВ ====================
-CHATS_DB_FILE = "all_chats.json"
-DONATIONS_FILE = "donations.json"
-
 def save_chat_id(chat_id):
     try:
         with open(CHATS_DB_FILE, "r", encoding="utf-8") as f:
@@ -120,10 +100,8 @@ def add_donation(user_id, amount):
     donations[user_id_str]["last"] = datetime.now().isoformat()
     save_donations(donations)
 
-# Для донатов (своя сумма)
+# ==================== ВРЕМЕННЫЕ ДАННЫЕ ====================
 temp_donation_amounts = {}
-
-# Ожидание рассылки
 pending_broadcast_all = {}
 
 # ==================== ВОПРОСЫ ДЛЯ /spin ====================
@@ -331,7 +309,7 @@ ANIMALS = [
     {"name": "Крокодил", "emoji": "🐊", "description": "Ты — крокодил! Ты скрываешь свои эмоции, но внутри ты эмоциональный и иногда пускаешь слезу."},
 ]
 
-# ==================== СТИКЕРЫ (ПУСТО - ВСТАВЬ СВОИ) ====================
+# ==================== СТИКЕРЫ (ВСТАВЬ СВОИ) ====================
 ALL_STICKERS = [
     "CAACAgIAAxUAAWokXU38_MuMDT7hhvRuZctYuCKJAALIoAACX-ToSLg5DDhF1X44OwQ",
     "CAACAgIAAxUAAWokXU3n6LDpd626aZfX7VT1CippAAKapAAC1p_wSAAByejMhUYpHjsE",
@@ -686,12 +664,8 @@ chat_cooldowns = {}
 pending_cooldown_input = {}
 
 user_stats = {}
-USER_STATS_FILE = "user_stats.json"
-
 games = {}
 game_timers = {}
-
-USER_GROUPS_FILE = "user_groups.json"
 user_groups = {}
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -1002,7 +976,7 @@ async def payment_successful(update: Update, context: ContextTypes.DEFAULT_TYPE)
         parse_mode="Markdown"
     )
 
-# ==================== НОВЫЕ КОМАНДЫ: /spin и /offer ====================
+# ==================== /spin ====================
 async def spin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Чат-рулетка: выбирает случайного участника и задаёт вопрос."""
     chat = update.effective_chat
@@ -1010,9 +984,10 @@ async def spin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🎲 Эта команда работает только в группах!")
         return
     
-    # Получаем список участников (до 200)
     try:
-        members = await context.bot.get_chat_members(chat.id, limit=200)
+        members = []
+        async for member in context.bot.get_chat_members(chat_id=chat.id, limit=200):
+            members.append(member)
     except Exception as e:
         await update.message.reply_text(f"❌ Не могу получить список участников: {e}")
         return
@@ -1021,7 +996,6 @@ async def spin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ В чате нет участников!")
         return
     
-    # Выбираем случайного участника (исключаем бота)
     bot_id = context.bot.id
     valid_members = [m for m in members if m.user.id != bot_id]
     if not valid_members:
@@ -1038,17 +1012,22 @@ async def spin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
+# ==================== /offer ====================
 async def offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Предложка: отправляет идею админу (только в ЛС)."""
+    """Предложка: если есть текст — отправляет админу, иначе показывает правила."""
     if update.effective_chat.type != "private":
         await update.message.reply_text("❌ Эта команда доступна только в личных сообщениях!")
         return
     
     text = " ".join(context.args) if context.args else ""
+    
     if not text:
         await update.message.reply_text(
-            "❌ Напиши свою идею после команды:\n`/offer Идея для бота`",
-            parse_mode="Markdown"
+            f"📋 **Прежде чем отправить предложение, ознакомься с правилами:**\n\n"
+            f"{OFFER_RULES_URL}\n\n"
+            f"После прочтения напиши `/offer Твоя идея` — и она уйдёт админу.",
+            parse_mode="Markdown",
+            disable_web_page_preview=True
         )
         return
     
@@ -1056,7 +1035,6 @@ async def offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
     user_name = f"@{user.username}" if user.username else user.first_name
     
-    # Отправляем админу
     kb = [
         [
             InlineKeyboardButton("✅ Принять", callback_data=f"offer_accept_{user_id}"),
@@ -1076,18 +1054,16 @@ async def offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def offer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик кнопок админа для предложки."""
     query = update.callback_query
     await query.answer()
     
-    user_id_from_callback = query.from_user.id
-    if user_id_from_callback != ADMIN_ID:
+    if query.from_user.id != ADMIN_ID:
         await query.answer("❌ Только админ может это делать!", show_alert=True)
         return
     
     data = query.data
     parts = data.split("_")
-    action = parts[1]  # accept или reject
+    action = parts[1]
     target_user_id = int(parts[2])
     
     if action == "accept":
@@ -1100,14 +1076,13 @@ async def offer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Не удалось отправить ответ пользователю {target_user_id}: {e}")
     
-    # Удаляем кнопки у админа
     await query.edit_message_text(
         text=query.message.text + f"\n\n✅ {action.capitalize()} (ответ отправлен)",
         reply_markup=None
     )
     await query.answer("✅ Готово!")
 
-# ==================== АДМИН-КОМАНДЫ ====================
+# ==================== АДМИН-КОМАНДЫ (рассылки) ====================
 async def chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id != ADMIN_ID:
@@ -1456,12 +1431,12 @@ async def sosat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     words = random.choices(RANDOM_WORDS, k=random.randint(3, 6))
     await update.message.reply_text(" ".join(words))
 
-# ==================== /zabava ====================
+# ==================== /zabava (через memegen.link) ====================
 async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_chat_id(update.effective_chat.id)
     add_activity(update.effective_chat.id, update.effective_user.id)
     message = update.message
-    
+
     if not message.photo and not (message.reply_to_message and message.reply_to_message.photo):
         await message.reply_text("📸 Отправь фото с подписью /zabava текст или ответь командой на фото.")
         return
@@ -1478,6 +1453,7 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Парсим текст с маркерами 1 и 2
     try:
         idx1 = args.index("1")
     except ValueError:
@@ -1510,6 +1486,7 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("❌ Текст не распознан. Пример: /zabava 1 Привет 2 Мир")
         return
 
+    # Скачиваем фото
     if message.photo:
         file_id = message.photo[-1].file_id
     else:
@@ -1520,83 +1497,39 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
         img_bytes = io.BytesIO()
         await file.download_to_memory(img_bytes)
         img_bytes.seek(0)
-        image = Image.open(img_bytes).convert("RGB")
+        image_data = img_bytes.read()
     except Exception as e:
         await message.reply_text(f"❌ Ошибка загрузки фото: {e}")
         return
 
-    max_size = 1200
-    if max(image.width, image.height) > max_size:
-        ratio = max_size / max(image.width, image.height)
-        new_size = (int(image.width * ratio), int(image.height * ratio))
-        image = image.resize(new_size, Image.Resampling.LANCZOS)
-
-    draw = ImageDraw.Draw(image)
-    width, height = image.size
-    
-    font_size = max(int(height / 10), 16)
-    font = get_impact_font(font_size)
-
-    def wrap_text(text, font, max_width):
-        words = text.split()
-        lines = []
-        current_line = ""
-        for word in words:
-            test_line = f"{current_line} {word}".strip()
-            bbox = draw.textbbox((0, 0), test_line, font=font)
-            if bbox[2] - bbox[0] <= max_width:
-                current_line = test_line
-            else:
-                if current_line:
-                    lines.append(current_line)
-                current_line = word
-        if current_line:
-            lines.append(current_line)
-        return lines
-
-    def draw_text_with_outline(text, y_start, is_top=True):
-        if not text:
+    # Загружаем на ImgBB
+    loop = asyncio.get_event_loop()
+    try:
+        photo_url = await loop.run_in_executor(None, upload_to_imgbb, image_data)
+        if not photo_url:
+            await message.reply_text("❌ Не удалось загрузить фото на хостинг (ImgBB).")
             return
-        
-        max_width = width - 40
-        lines = wrap_text(text, font, max_width)
-        
-        if not lines:
+    except Exception as e:
+        await message.reply_text(f"❌ Ошибка загрузки на хостинг: {e}")
+        return
+
+    # Кодируем текст и фон
+    top_enc = urllib.parse.quote(top_text if top_text else "_")
+    bottom_enc = urllib.parse.quote(bottom_text if bottom_text else "_")
+    bg_enc = urllib.parse.quote(photo_url)
+
+    url = f"https://api.memegen.link/images/custom/{top_enc}/{bottom_enc}.png?background={bg_enc}&font=impact"
+
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        response = await loop.run_in_executor(None, lambda: requests.get(url, headers=headers, timeout=30))
+        if response.status_code != 200:
+            await message.reply_text(f"❌ Ошибка генерации мема: {response.status_code}")
             return
-        
-        total_height = 0
-        line_heights = []
-        for line in lines:
-            bbox = draw.textbbox((0, 0), line, font=font)
-            line_height = bbox[3] - bbox[1] + 5
-            line_heights.append(line_height)
-            total_height += line_height
-        
-        if not is_top:
-            y_start = height - 10 - total_height
-        
-        y = y_start
-        for i, line in enumerate(lines):
-            bbox = draw.textbbox((0, 0), line, font=font)
-            line_width = bbox[2] - bbox[0]
-            x = (width - line_width) // 2
-            
-            for dx, dy in [(-2, -2), (-2, 0), (-2, 2), (0, -2), (0, 2), (2, -2), (2, 0), (2, 2)]:
-                draw.text((x + dx, y + dy), line, font=font, fill="black")
-            
-            draw.text((x, y), line, font=font, fill="white")
-            y += line_heights[i]
-
-    draw_text_with_outline(top_text, 10, is_top=True)
-    
-    if bottom_text:
-        draw_text_with_outline(bottom_text, height - 10, is_top=False)
-
-    output = io.BytesIO()
-    image.save(output, format="JPEG", quality=92)
-    output.seek(0)
-    
-    await message.reply_photo(photo=output, caption="🎭 Твой мем готов!")
+        meme_bytes = response.content
+        await message.reply_photo(photo=meme_bytes, caption="🎭 Твой мем готов!")
+    except Exception as e:
+        await message.reply_text(f"❌ Ошибка при создании мема: {e}")
 
 # ==================== /search ====================
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2207,9 +2140,9 @@ def run_flask():
 
 # ==================== ЗАПУСК ====================
 def main():
+    migrate_files()
     load_user_groups()
     load_stats()
-    download_font()
     
     app = Application.builder().token(TOKEN).build()
 
@@ -2256,4 +2189,4 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    main() 
