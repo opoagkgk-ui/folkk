@@ -41,6 +41,13 @@ MINI_APP_URL = "https://jalal-p7p9.onrender.com"
 IMGBB_API_KEY = "2bbaa8526b22fc8d7930403e13dbbdcd"
 UNSPLASH_ACCESS_KEY = "VTNenGnCKKbtcMddc_oN6qg5AGpmEXKUMDHK99qkbiA"
 
+def escape_markdown(text):
+    """Экранирует специальные символы для Markdown."""
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in special_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
+    
 # ==================== ПУТИ К ФАЙЛАМ (в /app/shared) ====================
 CHATS_DB_FILE = "/app/shared/all_chats.json"
 DONATIONS_FILE = "/app/shared/donations.json"
@@ -1018,18 +1025,16 @@ async def spin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== /offer ====================
 async def offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Предложка: если есть текст — отправляет админу, иначе показывает правила."""
     if update.effective_chat.type != "private":
         await update.message.reply_text("❌ Эта команда доступна только в личных сообщениях!")
         return
     
     text = " ".join(context.args) if context.args else ""
-    
     if not text:
         await update.message.reply_text(
-            f"📋 **Прежде чем отправить предложение, ознакомься с правилами:**\n\n"
+            f"📋 **Правила отправки предложений:**\n\n"
             f"{OFFER_RULES_URL}\n\n"
-            f"После прочтения напиши `/offer Твоя идея` — и она уйдёт админу.",
+            f"Напиши `/offer Твоя идея` — и она уйдёт админу.",
             parse_mode="Markdown",
             disable_web_page_preview=True
         )
@@ -1039,6 +1044,9 @@ async def offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
     user_name = f"@{user.username}" if user.username else user.first_name
     
+    # Экранируем текст пользователя, чтобы он не ломал Markdown
+    safe_text = escape_markdown(text)
+    
     kb = [
         [
             InlineKeyboardButton("✅ Принять", callback_data=f"offer_accept_{user_id}"),
@@ -1046,16 +1054,18 @@ async def offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
     ]
     
-    await context.bot.send_message(
-        chat_id=ADMIN_ID,
-        text=f"📩 **Новая идея от {user_name}** (ID: `{user_id}`)\n\n{text}",
-        reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode="Markdown"
-    )
-    
-    await update.message.reply_text(
-        "✅ Твоя идея отправлена админу! Спасибо за вклад! 🙌"
-    )
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"📩 **Новая идея от {user_name}** (ID: `{user_id}`)\n\n{safe_text}",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode="Markdown"
+        )
+        await update.message.reply_text("✅ Твоя идея отправлена админу! Спасибо за вклад! 🙌")
+    except Exception as e:
+        logging.error(f"Ошибка отправки предложения: {e}")
+        await update.message.reply_text(f"❌ Ошибка отправки. Попробуй позже.")
+
 
 async def offer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
