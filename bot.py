@@ -2940,10 +2940,10 @@ def main():
     app.add_handler(CallbackQueryHandler(card_callback, pattern="^card_"))
 
     if MONITOR_CHAT_ID:
-    job_queue = app.job_queue
-    if job_queue:
-        job_queue.run_repeating(send_monitor_report, interval=MONITOR_INTERVAL, first=10)
-        logging.info(f"📊 Мониторинг запущен! Интервал: {MONITOR_INTERVAL//60} минут")
+        job_queue = app.job_queue
+        if job_queue:
+            job_queue.run_repeating(send_monitor_report, interval=MONITOR_INTERVAL, first=10)
+            logging.info(f"📊 Мониторинг запущен! Интервал: {MONITOR_INTERVAL//60} минут")
 
     
     threading.Thread(target=run_flask, daemon=True).start()
