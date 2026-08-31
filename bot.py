@@ -771,6 +771,146 @@ def add_activity(chat_id, user_id):
     user_stats[chat_id][user_id] = user_stats[chat_id].get(user_id, 0) + 1
     save_stats()
 
+# ==================== КАРТОЧКИ (ФУНКЦИИ) ====================
+def load_cards_data():
+    """Загружает список всех карточек."""
+    os.makedirs("/app/shared", exist_ok=True)
+    try:
+        with open(CARDS_DATA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        default_cards = {
+            "common_1": {"name": "Обычная карточка 1", "rarity": "обычная", "file_id": "1111111111"},
+            "common_2": {"name": "Обычная карточка 2", "rarity": "обычная", "file_id": "1111111111"},
+            "rare_1": {"name": "Редкая карточка 1", "rarity": "редкая", "file_id": "1111111111"},
+            "rare_2": {"name": "Редкая карточка 2", "rarity": "редкая", "file_id": "1111111111"},
+            "epic_1": {"name": "Эпическая карточка 1", "rarity": "эпическая", "file_id": "1111111111"},
+            "epic_2": {"name": "Эпическая карточка 2", "rarity": "эпическая", "file_id": "1111111111"},
+            "mythic_1": {"name": "Мифическая карточка 1", "rarity": "мифическая", "file_id": "1111111111"},
+            "mythic_2": {"name": "Мифическая карточка 2", "rarity": "мифическая", "file_id": "1111111111"},
+            "legendary_1": {"name": "Легендарная карточка 1", "rarity": "легендарная", "file_id": "1111111111"},
+            "legendary_2": {"name": "Легендарная карточка 2", "rarity": "легендарная", "file_id": "1111111111"},
+            "secret_1": {"name": "Секретная карточка", "rarity": "секретная", "file_id": "1111111111"},
+        }
+        with open(CARDS_DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(default_cards, f, ensure_ascii=False, indent=2)
+        return default_cards
+
+def save_cards_data(cards):
+    with open(CARDS_DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(cards, f, ensure_ascii=False, indent=2)
+
+def load_user_cards():
+    os.makedirs("/app/shared", exist_ok=True)
+    try:
+        with open(USER_CARDS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def save_user_cards(data):
+    with open(USER_CARDS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def load_auction():
+    os.makedirs("/app/shared", exist_ok=True)
+    try:
+        with open(AUCTION_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def save_auction(data):
+    with open(AUCTION_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def get_user_card_data(user_id):
+    data = load_user_cards()
+    user_id_str = str(user_id)
+    if user_id_str not in data:
+        data[user_id_str] = {
+            "cards": [],
+            "balance": 0,
+            "total_cards": 0,
+            "first_card": False
+        }
+        save_user_cards(data)
+    return data[user_id_str]
+
+def save_user_card_data(user_id, user_data):
+    data = load_user_cards()
+    data[str(user_id)] = user_data
+    save_user_cards(data)
+
+def generate_card_instance_id():
+    import time
+    return f"card_{int(time.time()*1000)}_{random.randint(1000,9999)}"
+
+def roll_rarity(is_premium=False):
+    if is_premium:
+        rarities = {
+            "обычная": 5,
+            "редкая": 20,
+            "эпическая": 30,
+            "мифическая": 25,
+            "легендарная": 18,
+            "секретная": 2
+        }
+    else:
+        rarities = {
+            "обычная": 40,
+            "редкая": 25,
+            "эпическая": 20,
+            "мифическая": 10,
+            "легендарная": 4,
+            "секретная": 1
+        }
+    total = sum(rarities.values())
+    roll = random.randint(1, total)
+    cumulative = 0
+    for rarity, chance in rarities.items():
+        cumulative += chance
+        if roll <= cumulative:
+            return rarity
+    return "обычная"
+
+def get_card_by_rarity(rarity):
+    cards = load_cards_data()
+    available = [card_id for card_id, card in cards.items() if card["rarity"] == rarity]
+    if not available:
+        return None, None
+    card_id = random.choice(available)
+    return card_id, cards[card_id]
+
+def add_card_to_user(user_id, card_id, card_data):
+    user_data = get_user_card_data(user_id)
+    new_card = {
+        "instance_id": generate_card_instance_id(),
+        "card_id": card_id,
+        "name": card_data["name"],
+        "rarity": card_data["rarity"],
+        "file_id": card_data["file_id"]
+    }
+    user_data["cards"].append(new_card)
+    user_data["total_cards"] += 1
+    if not user_data.get("first_card", False):
+        user_data["first_card"] = True
+        user_data["balance"] = 100
+    save_user_card_data(user_id, user_data)
+    return new_card
+
+def get_user_balance(user_id):
+    user_data = get_user_card_data(user_id)
+    return user_data.get("balance", 0)
+
+def update_user_balance(user_id, amount):
+    user_data = get_user_card_data(user_id)
+    user_data["balance"] = user_data.get("balance", 0) + amount
+    save_user_card_data(user_id, user_data)
+    return user_data["balance"]
+
+
+
 # ==================== ЗАГРУЗКА НА IMGBB ====================
 def upload_to_imgbb(image_bytes):
     url = "https://api.imgbb.com/1/upload"
@@ -2340,6 +2480,252 @@ async def auction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Неизвестная команда. Используй `/ah sell` или `/ah buy`", parse_mode="Markdown")
     
 
+# ==================== КАРТОЧКИ (КОМАНДЫ) ====================
+async def card(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    message = update.message
+
+    now = datetime.now()
+    if user_id in card_cooldowns:
+        time_left = card_cooldowns[user_id] + timedelta(minutes=10) - now
+        if time_left > timedelta(0):
+            m, s = divmod(time_left.seconds, 60)
+            await message.reply_text(f"⏳ Подожди {m} мин {s} сек перед следующим открытием!")
+            return
+
+    kb = [
+        [
+            InlineKeyboardButton("🎴 Обычная (бесплатно)", callback_data="card_free"),
+            InlineKeyboardButton("💎 Платная (50 монет)", callback_data="card_premium"),
+        ]
+    ]
+    await message.reply_text(
+        "🎴 **Открыть карточку!**\n\n"
+        "Выбери тип прокрутки:\n"
+        "• Обычная — бесплатно, но шансы ниже\n"
+        "• Платная — 50 монет, шансы выше\n\n"
+        f"💰 Твой баланс: {get_user_balance(user_id)} монет",
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="Markdown"
+    )
+
+async def card_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    data = query.data
+    is_premium = data == "card_premium"
+    
+    now = datetime.now()
+    if user_id in card_cooldowns:
+        time_left = card_cooldowns[user_id] + timedelta(minutes=10) - now
+        if time_left > timedelta(0):
+            m, s = divmod(time_left.seconds, 60)
+            await query.edit_message_text(f"⏳ Подожди {m} мин {s} сек перед следующим открытием!")
+            return
+    
+    if is_premium:
+        balance = get_user_balance(user_id)
+        if balance < 50:
+            await query.edit_message_text("❌ Недостаточно монет! Нужно 50 монет для платной прокрутки.")
+            return
+        update_user_balance(user_id, -50)
+    
+    rarity = roll_rarity(is_premium)
+    card_id, card_data = get_card_by_rarity(rarity)
+    if not card_data:
+        await query.edit_message_text("❌ Ошибка! Карточка не найдена.")
+        return
+    
+    new_card = add_card_to_user(user_id, card_id, card_data)
+    card_cooldowns[user_id] = now
+    
+    rarity_emojis = {
+        "обычная": "⬜",
+        "редкая": "🟦",
+        "эпическая": "🟪",
+        "мифическая": "🌟",
+        "легендарная": "👑",
+        "секретная": "🔮"
+    }
+    
+    await query.edit_message_text(
+        f"{rarity_emojis.get(rarity, '🃏')} **{card_data['name']}**\n"
+        f"📊 Редкость: {rarity}\n"
+        f"💰 Баланс: {get_user_balance(user_id)} монет\n\n"
+        f"🔄 Следующую карточку можно открыть через 10 минут.",
+        parse_mode="Markdown"
+    )
+
+async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data = get_user_card_data(user_id)
+    balance = user_data.get("balance", 0)
+    total_cards = user_data.get("total_cards", 0)
+    cards = user_data.get("cards", [])
+    
+    rarity_counts = {}
+    for card in cards:
+        rarity = card.get("rarity", "неизвестно")
+        rarity_counts[rarity] = rarity_counts.get(rarity, 0) + 1
+    
+    rarity_emojis = {
+        "обычная": "⬜",
+        "редкая": "🟦",
+        "эпическая": "🟪",
+        "мифическая": "🌟",
+        "легендарная": "👑",
+        "секретная": "🔮"
+    }
+    
+    text = f"👤 **Твой профиль**\n\n"
+    text += f"💰 Баланс: {balance} монет\n"
+    text += f"🃏 Всего карточек: {total_cards}\n\n"
+    text += "📊 **По редкости:**\n"
+    for rarity, count in rarity_counts.items():
+        emoji = rarity_emojis.get(rarity, "🃏")
+        text += f"{emoji} {rarity}: {count}\n"
+    
+    if cards:
+        text += "\n🃏 **Последние карточки:**\n"
+        for card in cards[-5:]:
+            emoji = rarity_emojis.get(card.get("rarity", "обычная"), "🃏")
+            text += f"{emoji} {card.get('name', 'Неизвестно')}\n"
+    
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def auction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    if not args:
+        auction_data = load_auction()
+        if not auction_data:
+            await update.message.reply_text("📭 На аукционе пока нет лотов.\n\n"
+                                          "Чтобы выставить карточку:\n"
+                                          "`/ah sell <instance_id> <цена>`\n"
+                                          "Чтобы посмотреть список своих карточек:\n"
+                                          "`/profile`",
+                                          parse_mode="Markdown")
+            return
+        
+        text = "🏷️ **Активные лоты:**\n\n"
+        for lot_id, lot in list(auction_data.items())[:10]:
+            seller = lot.get("seller", "Неизвестно")
+            card_name = lot.get("card_name", "Карточка")
+            price = lot.get("price", 0)
+            text += f"• {card_name} — {price} монет (от {seller})\n"
+            text += f"  `/ah buy {lot_id}`\n"
+        
+        await update.message.reply_text(text, parse_mode="Markdown")
+        return
+    
+    if args[0].lower() == "sell":
+        if len(args) < 3:
+            await update.message.reply_text("❌ Использование: `/ah sell <instance_id> <цена>`", parse_mode="Markdown")
+            return
+        
+        instance_id = args[1]
+        try:
+            price = int(args[2])
+            if price <= 0:
+                await update.message.reply_text("❌ Цена должна быть больше 0!")
+                return
+        except ValueError:
+            await update.message.reply_text("❌ Цена должна быть числом!")
+            return
+        
+        user_data = get_user_card_data(user_id)
+        card_found = None
+        for card in user_data.get("cards", []):
+            if card.get("instance_id") == instance_id:
+                card_found = card
+                break
+        
+        if not card_found:
+            await update.message.reply_text("❌ У тебя нет такой карточки!")
+            return
+        
+        user_data["cards"] = [c for c in user_data["cards"] if c.get("instance_id") != instance_id]
+        save_user_card_data(user_id, user_data)
+        
+        auction_data = load_auction()
+        lot_id = f"lot_{int(time.time()*1000)}_{random.randint(1000,9999)}"
+        auction_data[lot_id] = {
+            "seller": user_id,
+            "card_name": card_found.get("name", "Карточка"),
+            "card_id": card_found.get("card_id", "unknown"),
+            "rarity": card_found.get("rarity", "обычная"),
+            "file_id": card_found.get("file_id", ""),
+            "instance_id": instance_id,
+            "price": price,
+            "created": datetime.now().isoformat()
+        }
+        save_auction(auction_data)
+        
+        await update.message.reply_text(f"✅ Карточка **{card_found.get('name')}** выставлена на аукцион за {price} монет!")
+        return
+    
+    if args[0].lower() == "buy":
+        if len(args) < 2:
+            await update.message.reply_text("❌ Использование: `/ah buy <lot_id>`", parse_mode="Markdown")
+            return
+        
+        lot_id = args[1]
+        auction_data = load_auction()
+        lot = auction_data.get(lot_id)
+        if not lot:
+            await update.message.reply_text("❌ Лот не найден или уже продан!")
+            return
+        
+        seller_id = lot.get("seller")
+        price = lot.get("price", 0)
+        
+        if seller_id == user_id:
+            await update.message.reply_text("❌ Ты не можешь купить свою карточку!")
+            return
+        
+        buyer_balance = get_user_balance(user_id)
+        if buyer_balance < price:
+            await update.message.reply_text(f"❌ Недостаточно монет! Нужно {price} монет.")
+            return
+        
+        seller_data = get_user_card_data(seller_id)
+        card_to_transfer = None
+        for card in seller_data.get("cards", []):
+            if card.get("instance_id") == lot.get("instance_id"):
+                card_to_transfer = card
+                break
+        
+        if not card_to_transfer:
+            await update.message.reply_text("❌ Ошибка! Карточка больше не доступна.")
+            auction_data.pop(lot_id, None)
+            save_auction(auction_data)
+            return
+        
+        update_user_balance(user_id, -price)
+        update_user_balance(seller_id, price)
+        
+        seller_data["cards"] = [c for c in seller_data["cards"] if c.get("instance_id") != lot.get("instance_id")]
+        save_user_card_data(seller_id, seller_data)
+        
+        buyer_data = get_user_card_data(user_id)
+        buyer_data["cards"].append(card_to_transfer)
+        buyer_data["total_cards"] += 1
+        save_user_card_data(user_id, buyer_data)
+        
+        auction_data.pop(lot_id, None)
+        save_auction(auction_data)
+        
+        await update.message.reply_text(f"✅ Поздравляем! Ты купил **{lot.get('card_name')}** за {price} монет!")
+        return
+    
+    await update.message.reply_text("❌ Неизвестная команда. Используй `/ah sell` или `/ah buy`", parse_mode="Markdown")
+
+
 # ==================== ТРИГГЕРЫ ====================
 async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -2547,7 +2933,12 @@ def main():
     app.add_handler(CommandHandler("ah", auction))
     app.add_handler(CommandHandler("auction", auction))
     app.add_handler(CallbackQueryHandler(card_callback, pattern="^card_"))
-    
+    app.add_handler(CommandHandler("card", card))
+    app.add_handler(CommandHandler("profile", profile))
+    app.add_handler(CommandHandler("ah", auction))
+    app.add_handler(CommandHandler("auction", auction))
+    app.add_handler(CallbackQueryHandler(card_callback, pattern="^card_"))
+
     if MONITOR_CHAT_ID:
     job_queue = app.job_queue
     if job_queue:
