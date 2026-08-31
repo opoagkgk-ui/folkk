@@ -55,6 +55,12 @@ USER_STATS_FILE = "/app/shared/user_stats.json"
 USER_GROUPS_FILE = "/app/shared/user_groups.json"
 OFFER_RULES_URL = "https://telegra.ph/Pravila-otpravki-predlozhenij-08-22"  # Замени на свою ссылку
 
+# ==================== КАРТОЧКИ ====================
+CARDS_DATA_FILE = "/app/shared/cards_data.json"
+USER_CARDS_FILE = "/app/shared/user_cards.json"
+AUCTION_FILE = "/app/shared/auction_lots.json"
+card_cooldowns = {}  # {user_id: datetime}
+
 # ==================== МИГРАЦИЯ ФАЙЛОВ ====================
 def migrate_files():
     """Переносит существующие файлы из корня в /app/shared при первом запуске."""
@@ -1995,6 +2001,284 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE,
             game_timers[chat_id].cancel()
             del game_timers[chat_id]
 
+async def card(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    message = update.message
+
+    # Проверка кулдауна (10 минут)
+    now = datetime.now()
+    if user_id in card_cooldowns:
+        time_left = card_cooldowns[user_id] + timedelta(minutes=10) - now
+        if time_left > timedelta(0):
+            m, s = divmod(time_left.seconds, 60)
+            await message.reply_text(f"⏳ Подожди {m} мин {s} сек перед следующим открытием!")
+            return
+
+    # Кнопки выбора: обычная или платная
+    kb = [
+        [
+            InlineKeyboardButton("🎴 Обычная (бесплатно)", callback_data="card_free"),
+            InlineKeyboardButton("💎 Платная (50 монет)", callback_data="card_premium"),
+        ]
+    ]
+    await message.reply_text(
+        "🎴 **Открыть карточку!**\n\n"
+        "Выбери тип прокрутки:\n"
+        "• Обычная — бесплатно, но шансы ниже\n"
+        "• Платная — 50 монет, шансы выше\n\n"
+        f"💰 Твой баланс: {get_user_balance(user_id)} монет",
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="Markdown"
+    )
+
+async def card_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    data = query.data
+    is_premium = data == "card_premium"
+    
+    # Проверка кулдауна
+    now = datetime.now()
+    if user_id in card_cooldowns:
+        time_left = card_cooldowns[user_id] + timedelta(minutes=10) - now
+        if time_left > timedelta(0):
+            m, s = divmod(time_left.seconds, 60)
+            await query.edit_message_text(f"⏳ Подожди {m} мин {s} сек перед следующим открытием!")
+            return
+    
+    # Проверка баланса для платной прокрутки
+    if is_premium:
+        balance = get_user_balance(user_id)
+        if balance < 50:
+            await query.edit_message_text("❌ Недостаточно монет! Нужно 50 монет для платной прокрутки.")
+            return
+        update_user_balance(user_id, -50)
+    
+    # Определяем редкость
+    rarity = roll_rarity(is_premium)
+    card_id, card_data = get_card_by_rarity(rarity)
+    if not card_data:
+        await query.edit_message_text("❌ Ошибка! Карточка не найдена.")
+        return
+    
+    # Добавляем карточку пользователю
+    new_card = add_card_to_user(user_id, card_id, card_data)
+    
+    # Устанавливаем кулдаун
+    card_cooldowns[user_id] = now
+    
+    # Эмодзи для редкости
+    rarity_emojis = {
+        "обычная": "⬜",
+        "редкая": "🟦",
+        "эпическая": "🟪",
+        "мифическая": "🌟",
+        "легендарная": "👑",
+        "секретная": "🔮"
+    }
+    
+    # Отправляем карточку с картинкой или текстом
+    if card_data.get("file_id") and card_data["file_id"] != "1111111111":
+        await query.edit_message_text(
+            f"{rarity_emojis.get(rarity, '🃏')} **{card_data['name']}**\n"
+            f"📊 Редкость: {rarity}\n"
+            f"💰 Баланс: {get_user_balance(user_id)} монет\n\n"
+            f"🔄 Следующую карточку можно открыть через 10 минут.",
+            parse_mode="Markdown"
+        )
+    else:
+        await query.edit_message_text(
+            f"{rarity_emojis.get(rarity, '🃏')} **{card_data['name']}**\n"
+            f"📊 Редкость: {rarity}\n"
+            f"💰 Баланс: {get_user_balance(user_id)} монет\n\n"
+            f"🔄 Следующую карточку можно открыть через 10 минут.",
+            parse_mode="Markdown"
+    )
+
+async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data = get_user_card_data(user_id)
+    balance = user_data.get("balance", 0)
+    total_cards = user_data.get("total_cards", 0)
+    cards = user_data.get("cards", [])
+    
+    # Считаем по редкостям
+    rarity_counts = {}
+    for card in cards:
+        rarity = card.get("rarity", "неизвестно")
+        rarity_counts[rarity] = rarity_counts.get(rarity, 0) + 1
+    
+    rarity_emojis = {
+        "обычная": "⬜",
+        "редкая": "🟦",
+        "эпическая": "🟪",
+        "мифическая": "🌟",
+        "легендарная": "👑",
+        "секретная": "🔮"
+    }
+    
+    text = f"👤 **Твой профиль**\n\n"
+    text += f"💰 Баланс: {balance} монет\n"
+    text += f"🃏 Всего карточек: {total_cards}\n\n"
+    text += "📊 **По редкости:**\n"
+    for rarity, count in rarity_counts.items():
+        emoji = rarity_emojis.get(rarity, "🃏")
+        text += f"{emoji} {rarity}: {count}\n"
+    
+    # Показываем последние 5 карточек
+    if cards:
+        text += "\n🃏 **Последние карточки:**\n"
+        for card in cards[-5:]:
+            emoji = rarity_emojis.get(card.get("rarity", "обычная"), "🃏")
+            text += f"{emoji} {card.get('name', 'Неизвестно')}\n"
+    
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def auction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Главное меню аукциона."""
+    args = context.args
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    if not args:
+        # Показываем список активных лотов
+        auction_data = load_auction()
+        if not auction_data:
+            await update.message.reply_text("📭 На аукционе пока нет лотов.\n\n"
+                                          "Чтобы выставить карточку:\n"
+                                          "`/ah sell <instance_id> <цена>`\n"
+                                          "Чтобы посмотреть список своих карточек:\n"
+                                          "`/profile`",
+                                          parse_mode="Markdown")
+            return
+        
+        text = "🏷️ **Активные лоты:**\n\n"
+        for lot_id, lot in list(auction_data.items())[:10]:
+            seller = lot.get("seller", "Неизвестно")
+            card_name = lot.get("card_name", "Карточка")
+            price = lot.get("price", 0)
+            text += f"• {card_name} — {price} монет (от {seller})\n"
+            text += f"  `/ah buy {lot_id}`\n"
+        
+        await update.message.reply_text(text, parse_mode="Markdown")
+        return
+    
+    if args[0].lower() == "sell":
+        # /ah sell <instance_id> <цена>
+        if len(args) < 3:
+            await update.message.reply_text("❌ Использование: `/ah sell <instance_id> <цена>`", parse_mode="Markdown")
+            return
+        
+        instance_id = args[1]
+        try:
+            price = int(args[2])
+            if price <= 0:
+                await update.message.reply_text("❌ Цена должна быть больше 0!")
+                return
+        except ValueError:
+            await update.message.reply_text("❌ Цена должна быть числом!")
+            return
+        
+        # Проверяем, есть ли у пользователя такая карточка
+        user_data = get_user_card_data(user_id)
+        card_found = None
+        for card in user_data.get("cards", []):
+            if card.get("instance_id") == instance_id:
+                card_found = card
+                break
+        
+        if not card_found:
+            await update.message.reply_text("❌ У тебя нет такой карточки!")
+            return
+        
+        # Удаляем карточку из инвентаря пользователя
+        user_data["cards"] = [c for c in user_data["cards"] if c.get("instance_id") != instance_id]
+        save_user_card_data(user_id, user_data)
+        
+        # Добавляем в аукцион
+        auction_data = load_auction()
+        lot_id = f"lot_{int(time.time()*1000)}_{random.randint(1000,9999)}"
+        auction_data[lot_id] = {
+            "seller": user_id,
+            "card_name": card_found.get("name", "Карточка"),
+            "card_id": card_found.get("card_id", "unknown"),
+            "rarity": card_found.get("rarity", "обычная"),
+            "file_id": card_found.get("file_id", ""),
+            "instance_id": instance_id,
+            "price": price,
+            "created": datetime.now().isoformat()
+        }
+        save_auction(auction_data)
+        
+        await update.message.reply_text(f"✅ Карточка **{card_found.get('name')}** выставлена на аукцион за {price} монет!")
+        return
+    
+    if args[0].lower() == "buy":
+        # /ah buy <lot_id>
+        if len(args) < 2:
+            await update.message.reply_text("❌ Использование: `/ah buy <lot_id>`", parse_mode="Markdown")
+            return
+        
+        lot_id = args[1]
+        auction_data = load_auction()
+        lot = auction_data.get(lot_id)
+        if not lot:
+            await update.message.reply_text("❌ Лот не найден или уже продан!")
+            return
+        
+        seller_id = lot.get("seller")
+        price = lot.get("price", 0)
+        
+        if seller_id == user_id:
+            await update.message.reply_text("❌ Ты не можешь купить свою карточку!")
+            return
+        
+        # Проверяем баланс покупателя
+        buyer_balance = get_user_balance(user_id)
+        if buyer_balance < price:
+            await update.message.reply_text(f"❌ Недостаточно монет! Нужно {price} монет.")
+            return
+        
+        # Проверяем, есть ли карточка у продавца
+        seller_data = get_user_card_data(seller_id)
+        card_to_transfer = None
+        for card in seller_data.get("cards", []):
+            if card.get("instance_id") == lot.get("instance_id"):
+                card_to_transfer = card
+                break
+        
+        if not card_to_transfer:
+            await update.message.reply_text("❌ Ошибка! Карточка больше не доступна.")
+            auction_data.pop(lot_id, None)
+            save_auction(auction_data)
+            return
+        
+        # Транзакция
+        # Списываем у покупателя
+        update_user_balance(user_id, -price)
+        # Добавляем продавцу
+        update_user_balance(seller_id, price)
+        # Удаляем у продавца
+        seller_data["cards"] = [c for c in seller_data["cards"] if c.get("instance_id") != lot.get("instance_id")]
+        save_user_card_data(seller_id, seller_data)
+        # Добавляем покупателю
+        buyer_data = get_user_card_data(user_id)
+        buyer_data["cards"].append(card_to_transfer)
+        buyer_data["total_cards"] += 1
+        save_user_card_data(user_id, buyer_data)
+        # Удаляем лот
+        auction_data.pop(lot_id, None)
+        save_auction(auction_data)
+        
+        await update.message.reply_text(f"✅ Поздравляем! Ты купил **{lot.get('card_name')}** за {price} монет!")
+        return
+    
+    await update.message.reply_text("❌ Неизвестная команда. Используй `/ah sell` или `/ah buy`", parse_mode="Markdown")
+    
+
 # ==================== ТРИГГЕРЫ ====================
 async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -2197,6 +2481,11 @@ def main():
     app.add_handler(CallbackQueryHandler(offer_callback, pattern="^offer_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), handle_broadcast_all_input))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cd_input))
+    app.add_handler(CommandHandler("card", card))
+    app.add_handler(CommandHandler("profile", profile))
+    app.add_handler(CommandHandler("ah", auction))
+    app.add_handler(CommandHandler("auction", auction))
+    app.add_handler(CallbackQueryHandler(card_callback, pattern="^card_"))
 
     threading.Thread(target=run_flask, daemon=True).start()
     logging.info(f"Бот запущен! Стикеров: folk={len(ALL_STICKERS)} litvin={len(litvin_stickers)} bred={len(bred_stickers)}")
