@@ -9,6 +9,7 @@ import io
 import threading
 import base64
 import aiohttp
+import psutil
 import time
 import shutil
 from collections import defaultdict
@@ -40,6 +41,66 @@ MINI_APP_URL = "https://jalal-p7p9.onrender.com"
 
 IMGBB_API_KEY = "2bbaa8526b22fc8d7930403e13dbbdcd"
 UNSPLASH_ACCESS_KEY = "VTNenGnCKKbtcMddc_oN6qg5AGpmEXKUMDHK99qkbiA"
+
+# ==================== МОНИТОРИНГ ====================
+MONITOR_CHAT_ID = -1003805849851 # ЗАМЕНИ НА ID КАНАЛА
+MONITOR_INTERVAL = 25 * 60  # 25 минут в секундах
+START_TIME = datetime.now()
+
+def get_system_info():
+    """Собирает информацию о доступности бота."""
+    # Время работы
+    uptime = datetime.now() - START_TIME
+    uptime_str = str(uptime).split('.')[0]  # убираем микросекунды
+    
+    # Пинг до Telegram API
+    try:
+        start = time.time()
+        requests.get("https://api.telegram.org", timeout=5)
+        ping = round((time.time() - start) * 1000, 2)
+    except:
+        ping = "Ошибка"
+    
+    # CPU и RAM
+    cpu = psutil.cpu_percent(interval=1)
+    ram = psutil.virtual_memory()
+    ram_used = round(ram.used / (1024**3), 2)  # в ГБ
+    ram_total = round(ram.total / (1024**3), 2)  # в ГБ
+    ram_percent = ram.percent
+    
+    return {
+        "uptime": uptime_str,
+        "ping": ping,
+        "cpu": cpu,
+        "ram_used": ram_used,
+        "ram_total": ram_total,
+        "ram_percent": ram_percent
+    }
+
+async def send_monitor_report(context: ContextTypes.DEFAULT_TYPE):
+    """Отправляет отчёт о доступности бота в канал."""
+    info = get_system_info()
+    
+    # Эмодзи для статуса
+    cpu_status = "🟢" if info["cpu"] < 70 else "🟡" if info["cpu"] < 90 else "🔴"
+    ram_status = "🟢" if info["ram_percent"] < 70 else "🟡" if info["ram_percent"] < 90 else "🔴"
+    ping_status = "🟢" if info["ping"] != "Ошибка" and info["ping"] < 200 else "🟡" if info["ping"] != "Ошибка" and info["ping"] < 500 else "🔴"
+    
+    text = (
+        f"📊 **Статус бота**\n\n"
+        f"⏱ **Аптайм:** {info['uptime']}\n"
+        f"{ping_status} **Пинг:** {info['ping']} мс\n\n"
+        f"💻 **Нагруженность:**\n"
+        f"  {cpu_status} CPU: {info['cpu']}%\n"
+        f"  {ram_status} RAM: {info['ram_used']} ГБ / {info['ram_total']} ГБ ({info['ram_percent']}%)\n\n"
+        f"🕐 Обновлено: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"
+    )
+    
+    try:
+        await context.bot.send_message(chat_id=MONITOR_CHAT_ID, text=text, parse_mode="Markdown")
+    except Exception as e:
+        logging.error(f"Ошибка отправки мониторинга: {e}")
+        
 
 def escape_markdown(text):
     """Экранирует специальные символы для Markdown."""
@@ -2486,7 +2547,14 @@ def main():
     app.add_handler(CommandHandler("ah", auction))
     app.add_handler(CommandHandler("auction", auction))
     app.add_handler(CallbackQueryHandler(card_callback, pattern="^card_"))
+    
+    if MONITOR_CHAT_ID:
+    job_queue = app.job_queue
+    if job_queue:
+        job_queue.run_repeating(send_monitor_report, interval=MONITOR_INTERVAL, first=10)
+        logging.info(f"📊 Мониторинг запущен! Интервал: {MONITOR_INTERVAL//60} минут")
 
+    
     threading.Thread(target=run_flask, daemon=True).start()
     logging.info(f"Бот запущен! Стикеров: folk={len(ALL_STICKERS)} litvin={len(litvin_stickers)} bred={len(bred_stickers)}")
     app.run_polling()
