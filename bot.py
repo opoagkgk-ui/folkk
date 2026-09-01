@@ -2725,6 +2725,114 @@ async def auction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text("❌ Неизвестная команда. Используй `/ah sell` или `/ah buy`", parse_mode="Markdown")
 
+# ==================== АДМИН-КОМАНДЫ ДЛЯ КАРТОЧЕК ====================
+async def list_cards(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет прав!")
+        return
+    cards = load_cards_data()
+    if not cards:
+        await update.message.reply_text("📭 Нет карточек!")
+        return
+    text = "🃏 **Список всех карточек:**\n\n"
+    rarity_order = {"обычная": 0, "редкая": 1, "эпическая": 2, "мифическая": 3, "легендарная": 4, "секретная": 5}
+    sorted_cards = sorted(cards.items(), key=lambda x: rarity_order.get(x[1].get("rarity", "обычная"), 99))
+    for card_id, card in sorted_cards:
+        rarity = card.get("rarity", "неизвестно")
+        emoji = {"обычная": "⬜", "редкая": "🟦", "эпическая": "🟪", "мифическая": "🌟", "легендарная": "👑", "секретная": "🔮"}.get(rarity, "🃏")
+        text += f"{emoji} `{card_id}` — {card.get('name', 'Без названия')} ({rarity})\n"
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def add_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет прав!")
+        return
+    args = context.args
+    if len(args) < 4:
+        await update.message.reply_text(
+            "❌ Использование:\n"
+            "`/addcard <id> <название> <редкость> <file_id>`\n\n"
+            "Редкости: обычная, редкая, эпическая, мифическая, легендарная, секретная\n"
+            "Пример: `/addcard my_card_1 Моя карточка легендарная AgACAgIAAxkBAAIB...`",
+            parse_mode="Markdown"
+        )
+        return
+    card_id = args[0]
+    name = args[1]
+    rarity = args[2].lower()
+    file_id = args[3]
+    valid_rarities = ["обычная", "редкая", "эпическая", "мифическая", "легендарная", "секретная"]
+    if rarity not in valid_rarities:
+        await update.message.reply_text(f"❌ Недопустимая редкость! Доступны: {', '.join(valid_rarities)}")
+        return
+    cards = load_cards_data()
+    if card_id in cards:
+        await update.message.reply_text(f"❌ Карточка с ID `{card_id}` уже существует!", parse_mode="Markdown")
+        return
+    cards[card_id] = {"name": name, "rarity": rarity, "file_id": file_id}
+    save_cards_data(cards)
+    await update.message.reply_text(f"✅ Карточка **{name}** (ID: `{card_id}`) добавлена!", parse_mode="Markdown")
+
+async def remove_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет прав!")
+        return
+    args = context.args
+    if not args:
+        await update.message.reply_text("❌ Использование: `/removecard <card_id>`", parse_mode="Markdown")
+        return
+    card_id = args[0]
+    cards = load_cards_data()
+    if card_id not in cards:
+        await update.message.reply_text(f"❌ Карточка с ID `{card_id}` не найдена!", parse_mode="Markdown")
+        return
+    card_name = cards[card_id].get("name", "Без названия")
+    del cards[card_id]
+    save_cards_data(cards)
+    await update.message.reply_text(f"✅ Карточка **{card_name}** (ID: `{card_id}`) удалена!", parse_mode="Markdown")
+
+async def edit_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет прав!")
+        return
+    args = context.args
+    if len(args) < 3:
+        await update.message.reply_text(
+            "❌ Использование:\n"
+            "`/editcard <card_id> <поле> <новое_значение>`\n\n"
+            "Доступные поля: name, rarity, file_id\n"
+            "Пример: `/editcard common_1 name Новая карточка`",
+            parse_mode="Markdown"
+        )
+        return
+    card_id = args[0]
+    field = args[1].lower()
+    new_value = " ".join(args[2:]) if len(args) > 2 else ""
+    if not new_value:
+        await update.message.reply_text("❌ Укажи новое значение!")
+        return
+    valid_fields = ["name", "rarity", "file_id"]
+    if field not in valid_fields:
+        await update.message.reply_text(f"❌ Доступные поля: {', '.join(valid_fields)}")
+        return
+    cards = load_cards_data()
+    if card_id not in cards:
+        await update.message.reply_text(f"❌ Карточка с ID `{card_id}` не найдена!", parse_mode="Markdown")
+        return
+    if field == "rarity":
+        valid_rarities = ["обычная", "редкая", "эпическая", "мифическая", "легендарная", "секретная"]
+        if new_value not in valid_rarities:
+            await update.message.reply_text(f"❌ Недопустимая редкость! Доступны: {', '.join(valid_rarities)}")
+            return
+    old_value = cards[card_id].get(field, "пусто")
+    cards[card_id][field] = new_value
+    save_cards_data(cards)
+    await update.message.reply_text(f"✅ Поле `{field}` карточки `{card_id}` обновлено!\nБыло: `{old_value}`\nСтало: `{new_value}`", parse_mode="Markdown")
+
 
 # ==================== ТРИГГЕРЫ ====================
 async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
