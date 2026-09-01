@@ -2241,7 +2241,6 @@ async def card_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     is_premium = data == "card_premium"
     
-    # Проверка кулдауна
     now = datetime.now()
     if user_id in card_cooldowns:
         time_left = card_cooldowns[user_id] + timedelta(minutes=10) - now
@@ -2250,7 +2249,6 @@ async def card_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"⏳ Подожди {m} мин {s} сек перед следующим открытием!")
             return
     
-    # Проверка баланса для платной прокрутки
     if is_premium:
         balance = get_user_balance(user_id)
         if balance < 50:
@@ -2258,9 +2256,51 @@ async def card_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         update_user_balance(user_id, -50)
     
-    # Определяем редкость
     rarity = roll_rarity(is_premium)
-    # Если выпала секретная карточка — уведомить админа
+    card_id, card_data = get_card_by_rarity(rarity)
+    if not card_data:
+        await query.edit_message_text("❌ Ошибка! Карточка не найдена.")
+        return
+    
+    new_card = add_card_to_user(user_id, card_id, card_data)
+    card_cooldowns[user_id] = now
+    
+    rarity_emojis = {
+        "обычная": "⬜",
+        "редкая": "🟦",
+        "эпическая": "🟪",
+        "мифическая": "🌟",
+        "легендарная": "👑",
+        "секретная": "🔮"
+    }
+    
+    caption = (
+        f"{rarity_emojis.get(rarity, '🃏')} **{card_data['name']}**\n"
+        f"📊 Редкость: {rarity}\n"
+        f"💰 Баланс: {get_user_balance(user_id)} монет\n\n"
+        f"🔄 Следующую карточку можно открыть через 10 минут."
+    )
+    
+    file_id = card_data.get("file_id")
+    if file_id and file_id != "1111111111":
+        try:
+            await context.bot.send_photo(
+                chat_id=query.message.chat_id,
+                photo=file_id,
+                caption=caption,
+                parse_mode="Markdown"
+            )
+            await query.delete_message()
+        except Exception as e:
+            logging.error(f"Ошибка отправки фото: {e}")
+            await query.edit_message_text(
+                f"{caption}\n\n⚠️ Не удалось загрузить изображение.",
+                parse_mode="Markdown"
+            )
+    else:
+        await query.edit_message_text(caption, parse_mode="Markdown")
+    
+    # Уведомление о секретной карточке
     if rarity == "секретная":
         try:
             user = update.effective_user
@@ -3084,15 +3124,15 @@ def main():
     app.add_handler(CallbackQueryHandler(offer_callback, pattern="^offer_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), handle_broadcast_all_input))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cd_input))
-    #app.add_handler(CommandHandler("card", card))
-    #app.add_handler(CommandHandler("profile", profile))
-    #app.add_handler(CommandHandler("ah", auction))
-    #app.add_handler(CommandHandler("auction", auction))
-    #app.add_handler(CallbackQueryHandler(card_callback, pattern="^card_"))
-    #app.add_handler(CommandHandler("card", card))
-    #app.add_handler(CommandHandler("profile", profile))
-    #app.add_handler(CommandHandler("ah", auction))
-    #app.add_handler(CommandHandler("auction", auction))
+    app.add_handler(CommandHandler("card", card))
+    app.add_handler(CommandHandler("profile", profile))
+    app.add_handler(CommandHandler("ah", auction))
+    app.add_handler(CommandHandler("auction", auction))
+    app.add_handler(CallbackQueryHandler(card_callback, pattern="^card_"))
+    app.add_handler(CommandHandler("card", card))
+    app.add_handler(CommandHandler("profile", profile))
+    app.add_handler(CommandHandler("ah", auction))
+    app.add_handler(CommandHandler("auction", auction))
     app.add_handler(CallbackQueryHandler(card_callback, pattern="^card_"))
     app.add_handler(CommandHandler("listcards", list_cards))
     app.add_handler(CommandHandler("addcard", add_card))
