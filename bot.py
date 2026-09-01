@@ -2260,6 +2260,20 @@ async def card_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Определяем редкость
     rarity = roll_rarity(is_premium)
+    # Если выпала секретная карточка — уведомить админа
+    if rarity == "секретная":
+        try:
+            user = update.effective_user
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"🔮 **СЕКРЕТНАЯ КАРТОЧКА!**\n\n"
+                     f"👤 Пользователь: @{user.username if user.username else user.first_name} (ID: `{user.id}`)\n"
+                     f"🃏 Карточка: **{card_data['name']}**\n"
+                     f"💰 Баланс после выпадения: {get_user_balance(user_id)} монет",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logging.error(f"Ошибка отправки уведомления о секретной карточке: {e}")
     card_id, card_data = get_card_by_rarity(rarity)
     if not card_data:
         await query.edit_message_text("❌ Ошибка! Карточка не найдена.")
@@ -2833,6 +2847,27 @@ async def edit_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_cards_data(cards)
     await update.message.reply_text(f"✅ Поле `{field}` карточки `{card_id}` обновлено!\nБыло: `{old_value}`\nСтало: `{new_value}`", parse_mode="Markdown")
 
+async def give_money(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет прав!")
+        return
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text("❌ Использование: `/givemoney <user_id> <сумма>`", parse_mode="Markdown")
+        return
+    try:
+        target_id = int(args[0])
+        amount = int(args[1])
+    except ValueError:
+        await update.message.reply_text("❌ ID и сумма должны быть числами!")
+        return
+    if amount <= 0:
+        await update.message.reply_text("❌ Сумма должна быть больше 0!")
+        return
+    new_balance = update_user_balance(target_id, amount)
+    await update.message.reply_text(f"✅ Пользователю `{target_id}` выдано {amount} монет.\n💰 Новый баланс: {new_balance}", parse_mode="Markdown")
+    
 
 # ==================== ТРИГГЕРЫ ====================
 async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3050,7 +3085,8 @@ def main():
     app.add_handler(CommandHandler("addcard", add_card))
     app.add_handler(CommandHandler("removecard", remove_card))
     app.add_handler(CommandHandler("editcard", edit_card))
-
+    app.add_handler(CommandHandler("givemoney", give_money))
+    
     if MONITOR_CHAT_ID:
         job_queue = app.job_queue
         if job_queue:
