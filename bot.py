@@ -2938,6 +2938,10 @@ def main():
     app.add_handler(CommandHandler("ah", auction))
     app.add_handler(CommandHandler("auction", auction))
     app.add_handler(CallbackQueryHandler(card_callback, pattern="^card_"))
+    app.add_handler(CommandHandler("listcards", list_cards))
+    app.add_handler(CommandHandler("addcard", add_card))
+    app.add_handler(CommandHandler("removecard", remove_card))
+    app.add_handler(CommandHandler("editcard", edit_card))
 
     if MONITOR_CHAT_ID:
         job_queue = app.job_queue
