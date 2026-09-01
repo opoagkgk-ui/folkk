@@ -2867,7 +2867,20 @@ async def give_money(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     new_balance = update_user_balance(target_id, amount)
     await update.message.reply_text(f"✅ Пользователю `{target_id}` выдано {amount} монет.\n💰 Новый баланс: {new_balance}", parse_mode="Markdown")
+
+async def getid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет прав!")
+        return
     
+    reply = update.message.reply_to_message
+    if reply and reply.photo:
+        file_id = reply.photo[-1].file_id
+        await update.message.reply_text(f"✅ `{file_id}`", parse_mode="Markdown")
+    else:
+        await update.message.reply_text("❌ Ответь на сообщение с фото командой /getid")
+        
 
 # ==================== ТРИГГЕРЫ ====================
 async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3086,6 +3099,7 @@ def main():
     app.add_handler(CommandHandler("removecard", remove_card))
     app.add_handler(CommandHandler("editcard", edit_card))
     app.add_handler(CommandHandler("givemoney", give_money))
+    app.add_handler(CommandHandler("getid", getid))
     
     if MONITOR_CHAT_ID:
         job_queue = app.job_queue
