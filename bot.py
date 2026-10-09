@@ -22,6 +22,7 @@ from telegram.ext import (
     CommandHandler,
     InlineQueryHandler,
     CallbackQueryHandler,
+    PreCheckoutQueryHandler,
     MessageHandler,
     ContextTypes,
     filters,
@@ -39,8 +40,8 @@ ADMIN_ID = 8371473442
 
 MINI_APP_URL = "https://jalal-p7p9.onrender.com"
 
-IMGBB_API_KEY = "2bbaa8526b22fc8d7930403e13dbbdcd"
-UNSPLASH_ACCESS_KEY = "VTNenGnCKKbtcMddc_oN6qg5AGpmEXKUMDHK99qkbiA"
+IMGBB_API_KEY = os.environ.get("IMGBB_API_KEY", "")
+UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "")
 
 # ==================== МОНИТОРИНГ ====================
 MONITOR_CHAT_ID = -1003805849851 # ЗАМЕНИ НА ID КАНАЛА
@@ -79,7 +80,7 @@ def get_system_info():
 
 async def send_monitor_report(context: ContextTypes.DEFAULT_TYPE):
     """Отправляет отчёт о доступности бота в канал."""
-    info = get_system_info()
+    info = await asyncio.to_thread(get_system_info)
     
     # Эмодзи для статуса
     cpu_status = "🟢" if info["cpu"] < 70 else "🟡" if info["cpu"] < 90 else "🔴"
@@ -1173,64 +1174,96 @@ async def create_invoice_and_send(query, user_id, amount, context):
         await query.edit_message_text(f"❌ Ошибка создания счёта: {e}")
 
 async def payment_successful(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    payment = message.successful_payment
-    if not payment:
+    message = update.effective_message
+    payment = message.successful_payment if message else None
+    user = update.effective_user
+    if not payment or not user:
         return
-    
-    user_id = update.effective_user.id
+    if payment.currency != "XTR":
+        logging.error("Отклонено уведомление об оплате в неизвестной валюте: %s", payment.currency)
+        return
+
+    charge_id = payment.telegram_payment_charge_id
+    processed = context.application.bot_data.setdefault("processed_star_payments", set())
+    if charge_id and charge_id in processed:
+        logging.warning("Повторное уведомление Telegram Stars: %s", charge_id)
+        return
+
     amount = payment.total_amount
-    
-    add_donation(user_id, amount)
-    
+    add_donation(user.id, amount)
+    if charge_id:
+        processed.add(charge_id)
+
     await message.reply_text(
-        f"🌟 **Спасибо за донат!**\n\n"
-        f"Ты пожертвовал **{amount} звёзд**.\n"
-        f"Твой вклад помогает боту развиваться! 🙌",
-        parse_mode="Markdown"
+        f"🌟 Спасибо за донат!\n\n"
+        f"Ты пожертвовал {amount} звёзд.\n"
+        f"Твой вклад помогает боту развиваться! 🙌"
     )
+
+
+async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Validate Telegram Stars invoice data before Telegram completes a payment."""
+    query = update.pre_checkout_query
+    if query is None:
+        return
+    try:
+        parts = query.invoice_payload.split("_", 3)
+        valid_payload = len(parts) == 4 and parts[0] == "donation"
+        owner_id = int(parts[1]) if valid_payload else None
+        expected_amount = int(parts[2]) if valid_payload else None
+        valid = (
+            valid_payload
+            and owner_id == query.from_user.id
+            and query.currency == "XTR"
+            and query.total_amount == expected_amount
+            and expected_amount is not None
+            and expected_amount > 0
+        )
+    except (TypeError, ValueError, IndexError):
+        valid = False
+    if not valid:
+        await query.answer(
+            ok=False,
+            error_message="Данные счёта не совпадают. Создай новый счёт через /donate.",
+        )
+        return
+    await query.answer(ok=True)
+
 
 # ==================== /spin ====================
 async def spin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Чат-рулетка: выбирает случайного участника и задаёт вопрос."""
+    """Pick a previously seen active group member; Bot API cannot list all members."""
     chat = update.effective_chat
-    if chat.type not in ["group", "supergroup"]:
-        await update.message.reply_text("🎲 Эта команда работает только в группах!")
+    message = update.effective_message
+    if not chat or not message:
         return
-    
-    try:
-        # Правильный способ для python-telegram-bot 20.x
-        members = []
-        async for member in context.bot.get_chat_members(chat_id=chat.id):
-            members.append(member)
-            if len(members) >= 200:
-                break
-    except Exception as e:
-        await update.message.reply_text(f"❌ Не могу получить список участников: {e}")
+    if chat.type not in ("group", "supergroup"):
+        await message.reply_text("🎲 Эта команда работает только в группах!")
         return
-    
-    if not members:
-        await update.message.reply_text("❌ В чате нет участников!")
+
+    known_ids = list(user_stats.get(chat.id, {}).keys())[:200]
+    candidates = []
+    for member_id in known_ids:
+        try:
+            member = await context.bot.get_chat_member(chat_id=chat.id, user_id=int(member_id))
+            if member.user and not member.user.is_bot and member.status not in ("left", "kicked"):
+                candidates.append(member.user)
+        except Exception as exc:
+            logging.debug("Не удалось проверить участника %s в %s: %s", member_id, chat.id, exc)
+
+    if not candidates:
+        await message.reply_text(
+            "Пока не знаю активных участников для рулетки. Пусть участники напишут сообщение или воспользуются командой бота, затем попробуй снова."
+        )
         return
-    
-    # Исключаем бота
-    bot_id = context.bot.id
-    valid_members = [m for m in members if m.user.id != bot_id]
-    if not valid_members:
-        await update.message.reply_text("❌ Нет участников, кроме бота!")
-        return
-    
-    target = random.choice(valid_members).user
+
+    target = random.choice(candidates)
     question = random.choice(SPIN_QUESTIONS)
-    
-    await update.message.reply_text(
-        f"🎲 **Чат-рулетка!**\n\n"
-        f"👤 Выпал: @{target.username if target.username else target.first_name}\n"
-        f"❓ Вопрос: **{question}**",
-        parse_mode="Markdown"
+    target_name = f"@{target.username}" if target.username else (target.first_name or "Участник")
+    await message.reply_text(
+        f"🎲 Чат-рулетка!\n\n👤 Выпал: {target_name}\n❓ Вопрос: {question}"
     )
 
-# ==================== /offer ====================
 async def offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         await update.message.reply_text("❌ Эта команда доступна только в личных сообщениях!")
@@ -1386,7 +1419,7 @@ async def handle_broadcast_all_input(update: Update, context: ContextTypes.DEFAU
             sent += 1
         except:
             failed += 1
-        time.sleep(0.3)
+        await asyncio.sleep(0.3)
     
     await status_msg.edit_text(
         f"✅ **Рассылка завершена!**\n\n"
@@ -1439,7 +1472,7 @@ async def go(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sent += 1
         except:
             failed += 1
-        time.sleep(0.3)
+        await asyncio.sleep(0.3)
     
     await status_msg.edit_text(
         f"✅ **Рассылка завершена!**\n\n"
@@ -1479,7 +1512,7 @@ async def donate_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sent += 1
         except:
             failed += 1
-        time.sleep(0.3)
+        await asyncio.sleep(0.3)
     
     await status_msg.edit_text(
         f"✅ **Рассылка донатерам завершена!**\n\n"
@@ -1607,7 +1640,8 @@ async def folk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id, user_id = update.effective_chat.id, update.effective_user.id
     cool, remain = check_cd(chat_id, user_id, 'folk')
     if cool:
-        m, s = divmod(remain.seconds, 60)
+        seconds_left = max(0, int(remain.total_seconds()))
+        m, s = divmod(seconds_left, 60)
         await update.message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
         return
     if not ALL_STICKERS:
@@ -1622,7 +1656,8 @@ async def litvin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id, user_id = update.effective_chat.id, update.effective_user.id
     cool, remain = check_cd(chat_id, user_id, 'litvin')
     if cool:
-        m, s = divmod(remain.seconds, 60)
+        seconds_left = max(0, int(remain.total_seconds()))
+        m, s = divmod(seconds_left, 60)
         await update.message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
         return
     if not litvin_stickers:
@@ -1637,7 +1672,8 @@ async def bred(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id, user_id = update.effective_chat.id, update.effective_user.id
     cool, remain = check_cd(chat_id, user_id, 'bred')
     if cool:
-        m, s = divmod(remain.seconds, 60)
+        seconds_left = max(0, int(remain.total_seconds()))
+        m, s = divmod(seconds_left, 60)
         await update.message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
         return
     if not bred_stickers:
@@ -1762,7 +1798,8 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     cool, remain = check_cd(chat_id, user_id, 'search')
     if cool:
-        m, s = divmod(remain.seconds, 60)
+        seconds_left = max(0, int(remain.total_seconds()))
+        m, s = divmod(seconds_left, 60)
         await message.reply_text(f"⏳ Подожди {m} мин {s} сек", quote=True)
         return
 
@@ -1805,7 +1842,7 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for idx, url in enumerate(selected):
         try:
-            response = await loop.run_in_executor(None, requests.get, url)
+            response = await loop.run_in_executor(None, lambda: requests.get(url, timeout=15))
             if response.status_code == 200:
                 cap = caption if idx == 0 else ""
                 await message.reply_photo(photo=response.content, caption=cap)
@@ -1826,7 +1863,8 @@ async def voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     cool, remain = check_cd(chat_id, user_id, 'voice')
     if cool:
-        m, s = divmod(remain.seconds, 60)
+        seconds_left = max(0, int(remain.total_seconds()))
+        m, s = divmod(seconds_left, 60)
         await message.reply_text(f"⏳ Подожди {m} мин {s} сек", quote=True)
         return
 
@@ -1851,10 +1889,10 @@ async def cat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_activity(update.effective_chat.id, update.effective_user.id)
     url = "https://api.thecatapi.com/v1/images/search"
     try:
-        response = requests.get(url, timeout=10)
+        response = await asyncio.to_thread(requests.get, url, timeout=10)
         data = response.json()
         if data and "url" in data[0]:
-            img_response = requests.get(data[0]["url"], timeout=10)
+            img_response = await asyncio.to_thread(requests.get, data[0]["url"], timeout=10)
             await update.message.reply_photo(photo=img_response.content, caption="🐱 Мяу!")
         else:
             await update.message.reply_text("❌ Не удалось найти котика!")
@@ -1866,10 +1904,10 @@ async def dog(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_activity(update.effective_chat.id, update.effective_user.id)
     url = "https://api.thedogapi.com/v1/images/search"
     try:
-        response = requests.get(url, timeout=10)
+        response = await asyncio.to_thread(requests.get, url, timeout=10)
         data = response.json()
         if data and "url" in data[0]:
-            img_response = requests.get(data[0]["url"], timeout=10)
+            img_response = await asyncio.to_thread(requests.get, data[0]["url"], timeout=10)
             await update.message.reply_photo(photo=img_response.content, caption="🐶 Гав!")
         else:
             await update.message.reply_text("❌ Не удалось найти собачку!")
@@ -2259,8 +2297,15 @@ async def card_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rarity = roll_rarity(is_premium)
     card_id, card_data = get_card_by_rarity(rarity)
     if not card_data:
-        await query.edit_message_text("❌ Ошибка! Карточка не найдена.")
-        return
+        available_cards = load_cards_data()
+        if available_cards:
+            card_id, card_data = random.choice(list(available_cards.items()))
+            rarity = card_data.get("rarity", rarity)
+        else:
+            if is_premium:
+                update_user_balance(user_id, 50)
+            await query.edit_message_text("❌ В каталоге пока нет доступных карточек. Монеты возвращены.")
+            return
     
     new_card = add_card_to_user(user_id, card_id, card_data)
     card_cooldowns[user_id] = now
@@ -2939,7 +2984,8 @@ async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         add_activity(chat_id, user_id)
         cool, remain = check_cd(chat_id, user_id, 'folk')
         if cool:
-            m, s = divmod(remain.seconds, 60)
+            seconds_left = max(0, int(remain.total_seconds()))
+            m, s = divmod(seconds_left, 60)
             await message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
             return
         if ALL_STICKERS:
@@ -2952,7 +2998,8 @@ async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         add_activity(chat_id, user_id)
         cool, remain = check_cd(chat_id, user_id, 'litvin')
         if cool:
-            m, s = divmod(remain.seconds, 60)
+            seconds_left = max(0, int(remain.total_seconds()))
+            m, s = divmod(seconds_left, 60)
             await message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
             return
         if litvin_stickers:
@@ -2965,7 +3012,8 @@ async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         add_activity(chat_id, user_id)
         cool, remain = check_cd(chat_id, user_id, 'bred')
         if cool:
-            m, s = divmod(remain.seconds, 60)
+            seconds_left = max(0, int(remain.total_seconds()))
+            m, s = divmod(seconds_left, 60)
             await message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
             return
         if bred_stickers:
@@ -3057,100 +3105,140 @@ async def cd_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== ИНЛАЙН ====================
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat_id(update.effective_chat.id)
-    if not ALL_STICKERS:
-        await update.inline_query.answer([], cache_time=0)
+    """Return a sticker for inline queries; inline updates have no effective_chat."""
+    query = update.inline_query
+    if query is None:
         return
-    sid = random.choice(ALL_STICKERS)
-    await update.inline_query.answer([
-        InlineQueryResultCachedSticker(id=str(random.randint(100000, 999999)), sticker_file_id=sid)
-    ], cache_time=0)
+    if not ALL_STICKERS:
+        await query.answer([], cache_time=0, is_personal=True)
+        return
+    sticker_id = random.choice(ALL_STICKERS)
+    await query.answer(
+        [InlineQueryResultCachedSticker(
+            id=str(random.randint(100000, 999999)),
+            sticker_file_id=sticker_id,
+        )],
+        cache_time=0,
+        is_personal=True,
+    )
+async def unhandled_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query:
+        try:
+            await query.answer("Эта кнопка устарела. Открой меню заново.", show_alert=True)
+        except Exception:
+            logging.debug("Не удалось ответить на устаревший callback", exc_info=True)
+
+
+async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Log callback/handler failures and show a useful alert when possible."""
+    error = context.error
+    if error:
+        logging.error(
+            "Ошибка обработчика update=%r: %s",
+            getattr(update, "update_id", None), error,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+    else:
+        logging.error("Неизвестная ошибка при обработке update=%r", getattr(update, "update_id", None))
+    query = getattr(update, "callback_query", None)
+    if query:
+        try:
+            await query.answer("Произошла ошибка. Попробуй ещё раз; подробности записаны в лог.", show_alert=True)
+        except Exception:
+            pass
+
 
 # ==================== FLASK ====================
+
 flask_app = Flask(__name__)
 
 @flask_app.route('/getUserGroups')
 def get_user_groups():
-    uid = request.args.get('user_id')
-    if not uid:
-        return jsonify({"ok": False})
-    return jsonify({"ok": True, "result": user_groups.get(int(uid), [])})
+    uid = request.args.get('user_id', type=str)
+    if not uid or not uid.lstrip('-').isdigit():
+        return jsonify({"ok": False, "error": "user_id must be an integer"}), 400
+    try:
+        user_id = int(uid)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "invalid user_id"}), 400
+    return jsonify({"ok": True, "result": user_groups.get(user_id, [])})
 
 def run_flask():
     flask_app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
 
+# FOLKK_PATCH_V1
 # ==================== ЗАПУСК ====================
 def main():
     migrate_files()
     load_user_groups()
     load_stats()
-    
+
     app = Application.builder().token(TOKEN).build()
+    app.add_error_handler(global_error_handler)
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("folk", folk))
-    app.add_handler(CommandHandler("litvin", litvin))
-    app.add_handler(CommandHandler("bred", bred))
-    app.add_handler(CommandHandler("sosat", sosat))
-    app.add_handler(CommandHandler("zabava", zabava))
-    app.add_handler(CommandHandler("search", search))
-    app.add_handler(CommandHandler("voice", voice))
-    app.add_handler(CommandHandler("cat", cat))
-    app.add_handler(CommandHandler("dog", dog))
-    app.add_handler(CommandHandler("top", top))
-    app.add_handler(CommandHandler("game", game))
-    app.add_handler(CommandHandler("answer", answer))
-    app.add_handler(CommandHandler("cooldown", cooldown_cmd))
-    app.add_handler(CommandHandler("factme", factme))
-    app.add_handler(CommandHandler("animal", animal))
-    app.add_handler(CommandHandler("chats", chats))
-    app.add_handler(CommandHandler("go", go))
-    app.add_handler(CommandHandler("donate", donate))
-    app.add_handler(CommandHandler("donates", donates))
-    app.add_handler(CommandHandler("donate_broadcast", donate_broadcast))
-    app.add_handler(CommandHandler("cancel", cancel_broadcast))
-    app.add_handler(CommandHandler("spin", spin))
-    app.add_handler(CommandHandler("offer", offer))
+    # Commands
+    command_handlers = [
+        ("start", start), ("folk", folk), ("litvin", litvin), ("bred", bred),
+        ("sosat", sosat), ("zabava", zabava), ("search", search), ("voice", voice),
+        ("cat", cat), ("dog", dog), ("top", top), ("game", game), ("answer", answer),
+        ("cooldown", cooldown_cmd), ("factme", factme), ("animal", animal),
+        ("chats", chats), ("go", go), ("donate", donate), ("donates", donates),
+        ("donate_broadcast", donate_broadcast), ("cancel", cancel_broadcast),
+        ("spin", spin), ("offer", offer), ("card", card), ("profile", profile),
+        ("ah", auction), ("auction", auction), ("listcards", list_cards),
+        ("addcard", add_card), ("removecard", remove_card), ("editcard", edit_card),
+        ("givemoney", give_money), ("getid", getid),
+    ]
+    for command, callback in command_handlers:
+        app.add_handler(CommandHandler(command, callback))
+
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_triggers))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, payment_successful))
+    app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
     app.add_handler(InlineQueryHandler(inline_query))
-    app.add_handler(CallbackQueryHandler(cd_button, pattern="^cd:"))
-    app.add_handler(CallbackQueryHandler(game_callback, pattern="^game_start:"))
-    app.add_handler(CallbackQueryHandler(game_callback, pattern="^game_stop:"))
-    app.add_handler(CallbackQueryHandler(game_rps_callback, pattern="^game_rps:"))
-    app.add_handler(CallbackQueryHandler(donate_callback, pattern="^donate_"))
-    app.add_handler(CallbackQueryHandler(broadcast_all_callback, pattern="^broadcast_all$"))
-    app.add_handler(CallbackQueryHandler(offer_callback, pattern="^offer_"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), handle_broadcast_all_input))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cd_input))
-    app.add_handler(CommandHandler("card", card))
-    app.add_handler(CommandHandler("profile", profile))
-    app.add_handler(CommandHandler("ah", auction))
-    app.add_handler(CommandHandler("auction", auction))
-    app.add_handler(CallbackQueryHandler(card_callback, pattern="^card_"))
-    app.add_handler(CommandHandler("card", card))
-    app.add_handler(CommandHandler("profile", profile))
-    app.add_handler(CommandHandler("ah", auction))
-    app.add_handler(CommandHandler("auction", auction))
-    app.add_handler(CallbackQueryHandler(card_callback, pattern="^card_"))
-    app.add_handler(CommandHandler("listcards", list_cards))
-    app.add_handler(CommandHandler("addcard", add_card))
-    app.add_handler(CommandHandler("removecard", remove_card))
-    app.add_handler(CommandHandler("editcard", edit_card))
-    app.add_handler(CommandHandler("givemoney", give_money))
-    app.add_handler(CommandHandler("getid", getid))
-    
-    if MONITOR_CHAT_ID:
-        job_queue = app.job_queue
-        if job_queue:
-            job_queue.run_repeating(send_monitor_report, interval=MONITOR_INTERVAL, first=10)
-            logging.info(f"📊 Мониторинг запущен! Интервал: {MONITOR_INTERVAL//60} минут")
 
-    
-    threading.Thread(target=run_flask, daemon=True).start()
-    logging.info(f"Бот запущен! Стикеров: folk={len(ALL_STICKERS)} litvin={len(litvin_stickers)} bred={len(bred_stickers)}")
+    # These filters match only when a stateful function is actually awaiting text.
+    # They must precede handle_triggers; otherwise generic text eats the update first.
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.create(
+            lambda u: bool(u.effective_user and u.effective_user.id == ADMIN_ID
+                           and u.effective_user.id in pending_broadcast_all)
+        ),
+        handle_broadcast_all_input,
+    ))
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.create(
+            lambda u: bool(u.effective_chat and u.effective_user
+                           and (u.effective_chat.id, u.effective_user.id) in pending_cooldown_input)
+        ),
+        cd_input,
+    ))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_triggers))
+
+    # Each callback_data family has one handler. The final handler answers stale/unknown buttons.
+    app.add_handler(CallbackQueryHandler(cd_button, pattern=r"^cd:(folk|litvin|bred|search|voice)$"))
+    app.add_handler(CallbackQueryHandler(game_callback, pattern=r"^game_start:"))
+    app.add_handler(CallbackQueryHandler(game_callback, pattern=r"^game_stop:"))
+    app.add_handler(CallbackQueryHandler(game_rps_callback, pattern=r"^game_rps:"))
+    app.add_handler(CallbackQueryHandler(donate_callback, pattern=r"^donate_"))
+    app.add_handler(CallbackQueryHandler(broadcast_all_callback, pattern=r"^broadcast_all$"))
+    app.add_handler(CallbackQueryHandler(offer_callback, pattern=r"^offer_"))
+    app.add_handler(CallbackQueryHandler(card_callback, pattern=r"^card_(free|premium)$"))
+    app.add_handler(CallbackQueryHandler(unhandled_callback))
+
+    if MONITOR_CHAT_ID:
+        if app.job_queue:
+            app.job_queue.run_repeating(send_monitor_report, interval=MONITOR_INTERVAL, first=10)
+            logging.info("📊 Мониторинг запущен! Интервал: %s минут", MONITOR_INTERVAL // 60)
+
+    threading.Thread(target=run_flask, daemon=True, name="flask-server").start()
+    logging.info(
+        "Бот запущен! Стикеров: folk=%s litvin=%s bred=%s",
+        len(ALL_STICKERS), len(litvin_stickers), len(bred_stickers),
+    )
     app.run_polling()
 
+
 if __name__ == "__main__":
-    main() 
+    main()
