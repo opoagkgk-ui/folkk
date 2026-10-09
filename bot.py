@@ -774,28 +774,90 @@ def add_activity(chat_id, user_id):
 
 # ==================== КАРТОЧКИ (ФУНКЦИИ) ====================
 def load_cards_data():
-    """Загружает список всех карточек."""
+    """Загружает каталог карточек, сохраняя остальные записи."""
     os.makedirs("/app/shared", exist_ok=True)
+
+    default_cards = {
+        "common_1": {
+            "name": "Атлас",
+            "rarity": "обычная",
+            "file_id": "AgACAgIAAxkBAAInf2qWul0Ge41cc-qr_grWPmHgtWhNAAKsH2sbFcKwSN8vUM89f1BZAQADAgADeQADPQQ",
+        },
+        "common_2": {
+            "name": "Лысый Атлас",
+            "rarity": "обычная",
+            "file_id": "AgACAgIAAxkBAAInmGqWyDv-LxsJ5KfarMoXlN0ijBz7AAKKImsbi6m4SJ-2JgTQoZWcAQADAgADeQADPQQ",
+        },
+        "rare_1": {
+            "name": "Кудрявый Атлас",
+            "rarity": "редкая",
+            "file_id": "AgACAgIAAxkBAAInn2qWyUEww97gD1i8ZPSKTK-lkdBlAAKfImsbi6m4SPniHV4q3992AQADAgADeQADPQQ",
+        },
+        "rare_2": {
+            "name": "Проказник",
+            "rarity": "редкая",
+            "file_id": "AgACAgIAAxkBAAIoG2qXBuXziyDulVfs7ONvLwhFVOAmAAIpJGsbi6m4SHsGTJ8d0BS8AQADAgADeAADPQQ",
+        },
+        "epic_1": {
+            "name": "Атлас Мафиози",
+            "rarity": "эпическая",
+            "file_id": "AgACAgIAAxkBAAIoJGqXCDyox3KSUQ65lYsR99KKhnzvAAItJGsbi6m4SAi6CPAL5tCEAQADAgADeAADPQQ",
+        },
+        "epic_2": {
+            "name": "Атлас Мудрец",
+            "rarity": "эпическая",
+            "file_id": "AgACAgIAAxkBAAIoLWqXCUrJ8JWLtemYZjUezwRxqI75AAI1JGsbi6m4SOxGxQPxb07SAQADAgADeQADPQQ",
+        },
+        "mythic_1": {
+            "name": "Атлас Эмо",
+            "rarity": "мифическая",
+            "file_id": "AgACAgIAAxkBAAIoOWqXC8587-jtnoR2skOlkHvIJRoGAAJAJGsbi6m4SNk7Vco6Q0lKAQADAgADeQADPQQ",
+        },
+        "mythic_2": {
+            "name": "4К Атлас",
+            "rarity": "мифическая",
+            "file_id": "AgACAgIAAxkBAAIoQGqXD_wj6z3DWGzbrNM90qP-1axxAAJZJGsbi6m4SMOzON2frSMqAQADAgADeQADPQQ",
+        },
+        "legendary_1": {
+            "name": "Атлас Б.",
+            "rarity": "легендарная",
+            "file_id": "AgACAgIAAxkBAAIoR2qXEQAB3zVKIo88pnXl9Bz9FBBiyQACXyRrG4upuEgbwoClJyOkxAEAAwIAA3kAAz0E",
+        },
+        "legendary_2": {
+            "name": "Легендарная карточка 2",
+            "rarity": "легендарная",
+            "file_id": "1111111111",
+        },
+        "secret_1": {
+            "name": "Секретная карточка",
+            "rarity": "секретная",
+            "file_id": "1111111111",
+        },
+    }
+
     try:
         with open(CARDS_DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        default_cards = {
-            "common_1": {"name": "Обычная карточка 1", "rarity": "обычная", "file_id": "1111111111"},
-            "common_2": {"name": "Обычная карточка 2", "rarity": "обычная", "file_id": "1111111111"},
-            "rare_1": {"name": "Редкая карточка 1", "rarity": "редкая", "file_id": "1111111111"},
-            "rare_2": {"name": "Редкая карточка 2", "rarity": "редкая", "file_id": "1111111111"},
-            "epic_1": {"name": "Эпическая карточка 1", "rarity": "эпическая", "file_id": "1111111111"},
-            "epic_2": {"name": "Эпическая карточка 2", "rarity": "эпическая", "file_id": "1111111111"},
-            "mythic_1": {"name": "Мифическая карточка 1", "rarity": "мифическая", "file_id": "1111111111"},
-            "mythic_2": {"name": "Мифическая карточка 2", "rarity": "мифическая", "file_id": "1111111111"},
-            "legendary_1": {"name": "Легендарная карточка 1", "rarity": "легендарная", "file_id": "1111111111"},
-            "legendary_2": {"name": "Легендарная карточка 2", "rarity": "легендарная", "file_id": "1111111111"},
-            "secret_1": {"name": "Секретная карточка", "rarity": "секретная", "file_id": "1111111111"},
-        }
-        with open(CARDS_DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(default_cards, f, ensure_ascii=False, indent=2)
-        return default_cards
+            cards = json.load(f)
+
+        if not isinstance(cards, dict):
+            logging.error("Каталог карточек должен быть JSON-объектом.")
+            cards = {}
+
+    except FileNotFoundError:
+        cards = {}
+
+    except json.JSONDecodeError:
+        logging.exception(
+            "Не удалось прочитать cards_data.json. "
+            "Используется встроенный каталог."
+        )
+        cards = {}
+
+    # Обновляем указанные карточки из кода.
+    # Остальные карточки из существующего каталога сохраняются.
+    cards.update(default_cards)
+
+    return cards
 
 def save_cards_data(cards):
     with open(CARDS_DATA_FILE, "w", encoding="utf-8") as f:
@@ -2271,132 +2333,182 @@ async def card(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-async def card_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def card_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
     query = update.callback_query
+
+    if not query:
+        return
+
     await query.answer()
-    
+
     user_id = query.from_user.id
-    data = query.data
-    is_premium = data == "card_premium"
-    
+    is_premium = query.data == "card_premium"
     now = datetime.now()
+
+    # Проверка кулдауна.
     if user_id in card_cooldowns:
-        time_left = card_cooldowns[user_id] + timedelta(minutes=10) - now
+        time_left = (
+            card_cooldowns[user_id]
+            + timedelta(minutes=10)
+            - now
+        )
+
         if time_left > timedelta(0):
-            m, s = divmod(time_left.seconds, 60)
-            await query.edit_message_text(f"⏳ Подожди {m} мин {s} сек перед следующим открытием!")
+            total_seconds = int(time_left.total_seconds())
+            minutes, seconds = divmod(total_seconds, 60)
+
+            await query.edit_message_text(
+                f"⏳ Подожди {minutes} мин {seconds} сек "
+                "перед следующим открытием!"
+            )
             return
-    
-    if is_premium:
-        balance = get_user_balance(user_id)
-        if balance < 50:
-            await query.edit_message_text("❌ Недостаточно монет! Нужно 50 монет для платной прокрутки.")
-            return
-        update_user_balance(user_id, -50)
-    
+
+    # Проверяем баланс, не списывая деньги заранее.
+    if is_premium and get_user_balance(user_id) < 50:
+        await query.edit_message_text(
+            "❌ Недостаточно монет! "
+            "Нужно 50 монет для платной прокрутки."
+        )
+        return
+
+    # Выбираем карточку до списания денег.
     rarity = roll_rarity(is_premium)
     card_id, card_data = get_card_by_rarity(rarity)
+
     if not card_data:
-        available_cards = load_cards_data()
-        if available_cards:
-            card_id, card_data = random.choice(list(available_cards.items()))
-            rarity = card_data.get("rarity", rarity)
-        else:
-            if is_premium:
-                update_user_balance(user_id, 50)
-            await query.edit_message_text("❌ В каталоге пока нет доступных карточек. Монеты возвращены.")
-            return
-    
-    new_card = add_card_to_user(user_id, card_id, card_data)
+        await query.edit_message_text(
+            "❌ Карточка такой редкости пока не найдена. "
+            "Монеты не списаны."
+        )
+        return
+
+    # Списываем оплату только после выбора существующей карточки.
+    if is_premium:
+        update_user_balance(user_id, -50)
+
+    # Выдаём карточку ровно один раз.
+    new_card = add_card_to_user(
+        user_id,
+        card_id,
+        card_data
+    )
+
     card_cooldowns[user_id] = now
-    
+
     rarity_emojis = {
         "обычная": "⬜",
         "редкая": "🟦",
         "эпическая": "🟪",
         "мифическая": "🌟",
         "легендарная": "👑",
-        "секретная": "🔮"
+        "секретная": "🔮",
     }
-    
+
+    card_name = card_data.get("name", "Неизвестная карточка")
+    rarity_emoji = rarity_emojis.get(rarity, "🃏")
+    balance = get_user_balance(user_id)
+
     caption = (
-        f"{rarity_emojis.get(rarity, '🃏')} **{card_data['name']}**\n"
+        f"{rarity_emoji} **{card_name}**\n"
         f"📊 Редкость: {rarity}\n"
-        f"💰 Баланс: {get_user_balance(user_id)} монет\n\n"
-        f"🔄 Следующую карточку можно открыть через 10 минут."
+        f"💰 Баланс: {balance} монет\n\n"
+        "🔄 Следующую карточку можно открыть "
+        "через 10 минут."
     )
-    
+
     file_id = card_data.get("file_id")
-    if file_id and file_id != "1111111111":
+    chat_id = query.message.chat_id if query.message else None
+
+    # Пытаемся отправить настоящее фото из Telegram.
+    if file_id and file_id != "1111111111" and chat_id:
         try:
             await context.bot.send_photo(
-                chat_id=query.message.chat_id,
+                chat_id=chat_id,
                 photo=file_id,
                 caption=caption,
-                parse_mode="Markdown"
+                parse_mode="Markdown",
             )
-            await query.delete_message()
-        except Exception as e:
-            logging.error(f"Ошибка отправки фото: {e}")
-            await query.edit_message_text(
-                f"{caption}\n\n⚠️ Не удалось загрузить изображение.",
-                parse_mode="Markdown"
+
+            # Удаляем старое сообщение с кнопками.
+            try:
+                await query.delete_message()
+            except Exception as delete_error:
+                logging.warning(
+                    "Фото отправлено, но сообщение с кнопками "
+                    "удалить не удалось: %s",
+                    delete_error,
+                )
+
+                try:
+                    await query.edit_message_reply_markup(
+                        reply_markup=None
+                    )
+                except Exception:
+                    pass
+
+        except Exception:
+            logging.exception(
+                "Не удалось отправить фото карточки %s",
+                card_id,
             )
+
+            # Карточка уже выдана и сохранена.
+            # При ошибке фото всё равно показываем результат.
+            try:
+                await query.edit_message_text(
+                    caption
+                    + "\n\n⚠️ Фото не отправилось, "
+                      "но карточка сохранена.",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                await context.bot.send_message(
+                    chat_id=chat_id or user_id,
+                    text=caption
+                    + "\n\n⚠️ Фото не отправилось, "
+                      "но карточка сохранена.",
+                    parse_mode="Markdown",
+                )
+
     else:
-        await query.edit_message_text(caption, parse_mode="Markdown")
-    
-    # Уведомление о секретной карточке
+        # Для карточек-заглушек показываем текст.
+        await query.edit_message_text(
+            caption
+            + "\n\n🖼️ Изображение для этой карточки "
+              "пока не добавлено.",
+            parse_mode="Markdown",
+        )
+
+    # Уведомление администратору о секретной карточке.
     if rarity == "секретная":
         try:
-            user = update.effective_user
+            user = query.from_user
+            username = (
+                f"@{user.username}"
+                if user.username
+                else user.first_name
+            )
+
             await context.bot.send_message(
                 chat_id=ADMIN_ID,
-                text=f"🔮 **СЕКРЕТНАЯ КАРТОЧКА!**\n\n"
-                     f"👤 Пользователь: @{user.username if user.username else user.first_name} (ID: `{user.id}`)\n"
-                     f"🃏 Карточка: **{card_data['name']}**\n"
-                     f"💰 Баланс после выпадения: {get_user_balance(user_id)} монет",
-                parse_mode="Markdown"
+                text=(
+                    "🔮 **СЕКРЕТНАЯ КАРТОЧКА!**\n\n"
+                    f"👤 Пользователь: {username} "
+                    f"(ID: `{user.id}`)\n"
+                    f"🃏 Карточка: **{card_name}**\n"
+                    f"💰 Баланс: {get_user_balance(user_id)} монет"
+                ),
+                parse_mode="Markdown",
             )
-        except Exception as e:
-            logging.error(f"Ошибка отправки уведомления о секретной карточке: {e}")
-    card_id, card_data = get_card_by_rarity(rarity)
-    if not card_data:
-        await query.edit_message_text("❌ Ошибка! Карточка не найдена.")
-        return
-    
-    # Добавляем карточку пользователю
-    new_card = add_card_to_user(user_id, card_id, card_data)
-    
-    # Устанавливаем кулдаун
-    card_cooldowns[user_id] = now
-    
-    # Эмодзи для редкости
-    rarity_emojis = {
-        "обычная": "⬜",
-        "редкая": "🟦",
-        "эпическая": "🟪",
-        "мифическая": "🌟",
-        "легендарная": "👑",
-        "секретная": "🔮"
-    }
-    
-    # Отправляем карточку с картинкой или текстом
-    if card_data.get("file_id") and card_data["file_id"] != "1111111111":
-        await query.edit_message_text(
-            f"{rarity_emojis.get(rarity, '🃏')} **{card_data['name']}**\n"
-            f"📊 Редкость: {rarity}\n"
-            f"💰 Баланс: {get_user_balance(user_id)} монет\n\n"
-            f"🔄 Следующую карточку можно открыть через 10 минут.",
-            parse_mode="Markdown"
-        )
-    else:
-        await query.edit_message_text(
-            f"{rarity_emojis.get(rarity, '🃏')} **{card_data['name']}**\n"
-            f"📊 Редкость: {rarity}\n"
-            f"💰 Баланс: {get_user_balance(user_id)} монет\n\n"
-            f"🔄 Следующую карточку можно открыть через 10 минут.",
-            parse_mode="Markdown"
-    )
+
+        except Exception:
+            logging.exception(
+                "Не удалось отправить уведомление "
+                "о секретной карточке."
+            )
 
 async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
