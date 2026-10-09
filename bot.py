@@ -2340,9 +2340,25 @@ async def card_callback(
     query = update.callback_query
 
     if not query:
+        logging.error("CARD CALLBACK: callback_query отсутствует")
         return
 
-    await query.answer()
+    logging.warning(
+        "CARD CALLBACK HIT: data=%r user_id=%s",
+        query.data,
+        query.from_user.id,
+    )
+
+    try:
+        await query.answer()
+        logging.warning(
+            "CARD CALLBACK ANSWERED: data=%r",
+            query.data,
+        )
+    except Exception:
+        logging.exception(
+            "CARD CALLBACK: ошибка при подтверждении нажатия"
+        )
 
     user_id = query.from_user.id
     is_premium = query.data == "card_premium"
