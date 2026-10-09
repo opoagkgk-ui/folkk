@@ -3103,6 +3103,36 @@ async def cd_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_cooldowns[update.effective_chat.id][cmd] = sec
     await update.message.reply_text(f"✅ /{cmd}: {sec}с")
 
+async def handle_text_router(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    """Направляет текст в нужный обработчик."""
+
+    if not update.message or not update.message.text:
+        return
+
+    user = update.effective_user
+    chat = update.effective_chat
+
+    if not user or not chat:
+        return
+
+    # Ввод текста для рассылки администратора
+    if user.id == ADMIN_ID and user.id in pending_broadcast_all:
+        await handle_broadcast_all_input(update, context)
+        return
+
+    # Ввод нового кулдауна
+    key = (chat.id, user.id)
+
+    if key in pending_cooldown_input:
+        await cd_input(update, context)
+        return
+
+    # Обычные текстовые триггеры
+    await handle_triggers(update, context)
+    
 # ==================== ИНЛАЙН ====================
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Return a sticker for inline queries; inline updates have no effective_chat."""
