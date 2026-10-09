@@ -3207,68 +3207,173 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_error_handler(global_error_handler)
 
-    # Commands
+    # Команды
     command_handlers = [
-        ("start", start), ("folk", folk), ("litvin", litvin), ("bred", bred),
-        ("sosat", sosat), ("zabava", zabava), ("search", search), ("voice", voice),
-        ("cat", cat), ("dog", dog), ("top", top), ("game", game), ("answer", answer),
-        ("cooldown", cooldown_cmd), ("factme", factme), ("animal", animal),
-        ("chats", chats), ("go", go), ("donate", donate), ("donates", donates),
-        ("donate_broadcast", donate_broadcast), ("cancel", cancel_broadcast),
-        ("spin", spin), ("offer", offer), ("card", card), ("profile", profile),
-        ("ah", auction), ("auction", auction), ("listcards", list_cards),
-        ("addcard", add_card), ("removecard", remove_card), ("editcard", edit_card),
-        ("givemoney", give_money), ("getid", getid),
+        ("start", start),
+        ("folk", folk),
+        ("litvin", litvin),
+        ("bred", bred),
+        ("sosat", sosat),
+        ("zabava", zabava),
+        ("search", search),
+        ("voice", voice),
+        ("cat", cat),
+        ("dog", dog),
+        ("top", top),
+        ("game", game),
+        ("answer", answer),
+        ("cooldown", cooldown_cmd),
+        ("factme", factme),
+        ("animal", animal),
+        ("chats", chats),
+        ("go", go),
+        ("donate", donate),
+        ("donates", donates),
+        ("donate_broadcast", donate_broadcast),
+        ("cancel", cancel_broadcast),
+        ("spin", spin),
+        ("offer", offer),
+        ("card", card),
+        ("profile", profile),
+        ("ah", auction),
+        ("auction", auction),
+        ("listcards", list_cards),
+        ("addcard", add_card),
+        ("removecard", remove_card),
+        ("editcard", edit_card),
+        ("givemoney", give_money),
+        ("getid", getid),
     ]
+
     for command, callback in command_handlers:
         app.add_handler(CommandHandler(command, callback))
 
-    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
-    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, payment_successful))
-    app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
+    # Служебные обработчики
+    app.add_handler(
+        MessageHandler(
+            filters.StatusUpdate.NEW_CHAT_MEMBERS,
+            welcome_new_member,
+        )
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.SUCCESSFUL_PAYMENT,
+            payment_successful,
+        )
+    )
+
+    app.add_handler(
+        PreCheckoutQueryHandler(precheckout_callback)
+    )
+
     app.add_handler(InlineQueryHandler(inline_query))
 
-    # These filters match only when a stateful function is actually awaiting text.
-    # They must precede handle_triggers; otherwise generic text eats the update first.
-    app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.create(
-            lambda u: bool(u.effective_user and u.effective_user.id == ADMIN_ID
-                           and u.effective_user.id in pending_broadcast_all)
-        ),
-        handle_broadcast_all_input,
-    ))
-    app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.create(
-            lambda u: bool(u.effective_chat and u.effective_user
-                           and (u.effective_chat.id, u.effective_user.id) in pending_cooldown_input)
-        ),
-        cd_input,
-    ))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_triggers))
-
-    # Each callback_data family has one handler. The final handler answers stale/unknown buttons.
-    app.add_handler(CallbackQueryHandler(cd_button, pattern=r"^cd:(folk|litvin|bred|search|voice)$"))
-    app.add_handler(CallbackQueryHandler(game_callback, pattern=r"^game_start:"))
-    app.add_handler(CallbackQueryHandler(game_callback, pattern=r"^game_stop:"))
-    app.add_handler(CallbackQueryHandler(game_rps_callback, pattern=r"^game_rps:"))
-    app.add_handler(CallbackQueryHandler(donate_callback, pattern=r"^donate_"))
-    app.add_handler(CallbackQueryHandler(broadcast_all_callback, pattern=r"^broadcast_all$"))
-    app.add_handler(CallbackQueryHandler(offer_callback, pattern=r"^offer_"))
-    app.add_handler(CallbackQueryHandler(card_callback, pattern=r"^card_(free|premium)$"))
-    app.add_handler(CallbackQueryHandler(unhandled_callback))
-
-    if MONITOR_CHAT_ID:
-        if app.job_queue:
-            app.job_queue.run_repeating(send_monitor_report, interval=MONITOR_INTERVAL, first=10)
-            logging.info("📊 Мониторинг запущен! Интервал: %s минут", MONITOR_INTERVAL // 60)
-
-    threading.Thread(target=run_flask, daemon=True, name="flask-server").start()
-    logging.info(
-        "Бот запущен! Стикеров: folk=%s litvin=%s bred=%s",
-        len(ALL_STICKERS), len(litvin_stickers), len(bred_stickers),
+    # Весь обычный текст направляется через одну функцию.
+    # Не добавляй отдельно handle_triggers, cd_input
+    # или handle_broadcast_all_input как MessageHandler.
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle_text_router,
+        )
     )
+
+    # Кулдауны
+    app.add_handler(
+        CallbackQueryHandler(
+            cd_button,
+            pattern=r"^cd:(folk|litvin|bred|search|voice)$",
+        )
+    )
+
+    # Игры
+    app.add_handler(
+        CallbackQueryHandler(
+            game_callback,
+            pattern=r"^game_start:",
+        )
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
+            game_callback,
+            pattern=r"^game_stop:",
+        )
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
+            game_rps_callback,
+            pattern=r"^game_rps:",
+        )
+    )
+
+    # Донаты и рассылки
+    app.add_handler(
+        CallbackQueryHandler(
+            donate_callback,
+            pattern=r"^donate_",
+        )
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
+            broadcast_all_callback,
+            pattern=r"^broadcast_all$",
+        )
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
+            offer_callback,
+            pattern=r"^offer_",
+        )
+    )
+
+    # Карточки
+    app.add_handler(
+        CallbackQueryHandler(
+            card_callback,
+            pattern=r"^card_(free|premium)$",
+        )
+    )
+
+    # Обработка неизвестных и устаревших кнопок
+    app.add_handler(
+        CallbackQueryHandler(unhandled_callback)
+    )
+
+    # Мониторинг
+    if MONITOR_CHAT_ID and app.job_queue:
+        app.job_queue.run_repeating(
+            send_monitor_report,
+            interval=MONITOR_INTERVAL,
+            first=10,
+        )
+
+        logging.info(
+            "Мониторинг запущен! Интервал: %s минут",
+            MONITOR_INTERVAL // 60,
+        )
+
+    # Flask
+    threading.Thread(
+        target=run_flask,
+        daemon=True,
+        name="flask-server",
+    ).start()
+
+    logging.info(
+        "Бот запускается! Стикеров: folk=%s litvin=%s bred=%s",
+        len(ALL_STICKERS),
+        len(litvin_stickers),
+        len(bred_stickers),
+    )
+
     app.run_polling()
 
 
 if __name__ == "__main__":
     main()
+    
