@@ -12,21 +12,20 @@ import aiohttp
 import psutil
 import time
 import shutil
-from collections import defaultdict
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
-from telegram import Update, InlineQueryResultCachedSticker, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
-from telegram.constants import ChatMemberStatus
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    InlineQueryHandler,
-    CallbackQueryHandler,
-    PreCheckoutQueryHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
+
+from aiogram import Bot, Dispatcher, F, Router
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.filters import Command
+from aiogram.types import (
+    Message, CallbackQuery, InlineQuery,
+    InlineKeyboardMarkup, InlineKeyboardButton,
+    InlineQueryResultCachedSticker, WebAppInfo, PreCheckoutQuery,
 )
+from aiogram.exceptions import TelegramBadRequest
+
 from deep_translator import GoogleTranslator
 from gtts import gTTS
 from io import BytesIO
@@ -37,103 +36,68 @@ if not TOKEN:
     raise ValueError("Переменная окружения API_TOKEN не установлена!")
 
 ADMIN_ID = 8371473442
-
 MINI_APP_URL = "https://jalal-p7p9.onrender.com"
 
 IMGBB_API_KEY = os.environ.get("IMGBB_API_KEY", "")
 UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "")
 
 # ==================== МОНИТОРИНГ ====================
-MONITOR_CHAT_ID = -1003805849851 # ЗАМЕНИ НА ID КАНАЛА
-MONITOR_INTERVAL = 25 * 60  # 25 минут в секундах
+MONITOR_CHAT_ID = -1003805849851
+MONITOR_INTERVAL = 25 * 60
 START_TIME = datetime.now()
 
-def get_system_info():
-    """Собирает информацию о доступности бота."""
-    # Время работы
-    uptime = datetime.now() - START_TIME
-    uptime_str = str(uptime).split('.')[0]  # убираем микросекунды
-    
-    # Пинг до Telegram API
-    try:
-        start = time.time()
-        requests.get("https://api.telegram.org", timeout=5)
-        ping = round((time.time() - start) * 1000, 2)
-    except:
-        ping = "Ошибка"
-    
-    # CPU и RAM
-    cpu = psutil.cpu_percent(interval=1)
-    ram = psutil.virtual_memory()
-    ram_used = round(ram.used / (1024**3), 2)  # в ГБ
-    ram_total = round(ram.total / (1024**3), 2)  # в ГБ
-    ram_percent = ram.percent
-    
-    return {
-        "uptime": uptime_str,
-        "ping": ping,
-        "cpu": cpu,
-        "ram_used": ram_used,
-        "ram_total": ram_total,
-        "ram_percent": ram_percent
-    }
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
+log = logging.getLogger("folkvalley")
 
-async def send_monitor_report(context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет отчёт о доступности бота в канал."""
-    info = await asyncio.to_thread(get_system_info)
-    
-    # Эмодзи для статуса
-    cpu_status = "🟢" if info["cpu"] < 70 else "🟡" if info["cpu"] < 90 else "🔴"
-    ram_status = "🟢" if info["ram_percent"] < 70 else "🟡" if info["ram_percent"] < 90 else "🔴"
-    ping_status = "🟢" if info["ping"] != "Ошибка" and info["ping"] < 200 else "🟡" if info["ping"] != "Ошибка" and info["ping"] < 500 else "🔴"
-    
-    text = (
-        f"📊 **Статус бота**\n\n"
-        f"⏱ **Аптайм:** {info['uptime']}\n"
-        f"{ping_status} **Пинг:** {info['ping']} мс\n\n"
-        f"💻 **Нагруженность:**\n"
-        f"  {cpu_status} CPU: {info['cpu']}%\n"
-        f"  {ram_status} RAM: {info['ram_used']} ГБ / {info['ram_total']} ГБ ({info['ram_percent']}%)\n\n"
-        f"🕐 Обновлено: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"
-    )
-    
-    try:
-        await context.bot.send_message(chat_id=MONITOR_CHAT_ID, text=text, parse_mode="Markdown")
-    except Exception as e:
-        logging.error(f"Ошибка отправки мониторинга: {e}")
-        
+router = Router()
+bot: Bot = None
 
-def escape_markdown(text):
-    """Экранирует специальные символы для Markdown."""
-    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-    for char in special_chars:
-        text = text.replace(char, f'\\{char}')
-    return text
-    
-# ==================== ПУТИ К ФАЙЛАМ (в /app/shared) ====================
+# ==================== ПУТИ ====================
 CHATS_DB_FILE = "/app/shared/all_chats.json"
 DONATIONS_FILE = "/app/shared/donations.json"
 USER_STATS_FILE = "/app/shared/user_stats.json"
 USER_GROUPS_FILE = "/app/shared/user_groups.json"
-OFFER_RULES_URL = "https://telegra.ph/Pravila-otpravki-predlozhenij-08-22"  # Замени на свою ссылку
+OFFER_RULES_URL = "https://telegra.ph/Pravila-otpravki-predlozhenij-08-22"
 
-# ==================== КАРТОЧКИ ====================
 CARDS_DATA_FILE = "/app/shared/cards_data.json"
 USER_CARDS_FILE = "/app/shared/user_cards.json"
 AUCTION_FILE = "/app/shared/auction_lots.json"
-card_cooldowns = {}  # {user_id: datetime}
+card_cooldowns = {}
 
-# ==================== МИГРАЦИЯ ФАЙЛОВ ====================
+# ==================== ВРЕМЕННЫЕ ДАННЫЕ ====================
+temp_donation_amounts = {}
+pending_broadcast_all = {}
+pending_cooldown_input = {}
+user_stats = {}
+games = {}
+game_timers = {}
+user_groups = {}
+
+cooldowns_folk = {}
+cooldowns_litvin = {}
+cooldowns_bred = {}
+cooldowns_search = {}
+cooldowns_voice = {}
+chat_cooldowns = {}
+
+
+# ==================== УТИЛИТЫ ====================
+def get_args(message: Message):
+    parts = (message.text or "").split(maxsplit=1)
+    return parts[1].split() if len(parts) > 1 else []
+
+
+def escape_markdown(text):
+    for ch in ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']:
+        text = text.replace(ch, f'\\{ch}')
+    return text
+
+
+# ==================== МИГРАЦИЯ ====================
 def migrate_files():
-    """Переносит существующие файлы из корня в /app/shared при первом запуске."""
     os.makedirs("/app/shared", exist_ok=True)
-    files_to_migrate = [
-        ("all_chats.json", CHATS_DB_FILE),
-        ("donations.json", DONATIONS_FILE),
-        ("user_stats.json", USER_STATS_FILE),
-        ("user_groups.json", USER_GROUPS_FILE),
-    ]
-    for src, dst in files_to_migrate:
+    for src, dst in [("all_chats.json", CHATS_DB_FILE), ("donations.json", DONATIONS_FILE),
+                     ("user_stats.json", USER_STATS_FILE), ("user_groups.json", USER_GROUPS_FILE)]:
         if os.path.exists(src) and not os.path.exists(dst):
             try:
                 shutil.copy2(src, dst)
@@ -141,7 +105,50 @@ def migrate_files():
             except Exception as e:
                 print(f"⚠️ Не удалось перенести {src}: {e}")
 
-# ==================== СОХРАНЕНИЕ ЧАТОВ ====================
+
+# ==================== МОНИТОРИНГ ====================
+def get_system_info():
+    uptime_str = str(datetime.now() - START_TIME).split('.')[0]
+    try:
+        start = time.time()
+        requests.get("https://api.telegram.org", timeout=5)
+        ping = round((time.time() - start) * 1000, 2)
+    except Exception:
+        ping = "Ошибка"
+    cpu = psutil.cpu_percent(interval=1)
+    ram = psutil.virtual_memory()
+    return {
+        "uptime": uptime_str, "ping": ping, "cpu": cpu,
+        "ram_used": round(ram.used / (1024**3), 2),
+        "ram_total": round(ram.total / (1024**3), 2),
+        "ram_percent": ram.percent,
+    }
+
+
+async def monitor_loop():
+    await asyncio.sleep(10)
+    while True:
+        try:
+            info = await asyncio.to_thread(get_system_info)
+            cpu_s = "🟢" if info["cpu"] < 70 else "🟡" if info["cpu"] < 90 else "🔴"
+            ram_s = "🟢" if info["ram_percent"] < 70 else "🟡" if info["ram_percent"] < 90 else "🔴"
+            ping_s = "🟢" if info["ping"] != "Ошибка" and info["ping"] < 200 else "🟡" if info["ping"] != "Ошибка" and info["ping"] < 500 else "🔴"
+            text = (
+                f"📊 **Статус бота**\n\n"
+                f"⏱ **Аптайм:** {info['uptime']}\n"
+                f"{ping_s} **Пинг:** {info['ping']} мс\n\n"
+                f"💻 **Нагруженность:**\n"
+                f"  {cpu_s} CPU: {info['cpu']}%\n"
+                f"  {ram_s} RAM: {info['ram_used']} ГБ / {info['ram_total']} ГБ ({info['ram_percent']}%)\n\n"
+                f"🕐 Обновлено: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"
+            )
+            await bot.send_message(MONITOR_CHAT_ID, text, parse_mode="Markdown")
+        except Exception as e:
+            log.error(f"Ошибка мониторинга: {e}")
+        await asyncio.sleep(MONITOR_INTERVAL)
+
+
+# ==================== ЧАТЫ ====================
 def save_chat_id(chat_id):
     try:
         with open(CHATS_DB_FILE, "r", encoding="utf-8") as f:
@@ -153,6 +160,7 @@ def save_chat_id(chat_id):
         with open(CHATS_DB_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
+
 # ==================== ДОНАТЫ ====================
 def load_donations():
     try:
@@ -161,23 +169,277 @@ def load_donations():
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
-def save_donations(donations):
+
+def save_donations(d):
     with open(DONATIONS_FILE, "w", encoding="utf-8") as f:
-        json.dump(donations, f, ensure_ascii=False, indent=2)
+        json.dump(d, f, ensure_ascii=False, indent=2)
+
 
 def add_donation(user_id, amount):
-    donations = load_donations()
-    user_id_str = str(user_id)
-    if user_id_str not in donations:
-        donations[user_id_str] = {"total": 0, "count": 0, "last": None}
-    donations[user_id_str]["total"] += amount
-    donations[user_id_str]["count"] += 1
-    donations[user_id_str]["last"] = datetime.now().isoformat()
-    save_donations(donations)
+    d = load_donations()
+    uid = str(user_id)
+    d.setdefault(uid, {"total": 0, "count": 0, "last": None})
+    d[uid]["total"] += amount
+    d[uid]["count"] += 1
+    d[uid]["last"] = datetime.now().isoformat()
+    save_donations(d)
 
-# ==================== ВРЕМЕННЫЕ ДАННЫЕ ====================
-temp_donation_amounts = {}
-pending_broadcast_all = {}
+
+# ==================== РЕЙТИНГ ====================
+def load_stats():
+    global user_stats
+    if os.path.exists(USER_STATS_FILE):
+        try:
+            with open(USER_STATS_FILE, 'r', encoding='utf-8') as f:
+                user_stats = {int(k): {int(u): c for u, c in v.items()} for k, v in json.load(f).items()}
+        except Exception:
+            user_stats = {}
+
+
+def save_stats():
+    try:
+        with open(USER_STATS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(user_stats, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def add_activity(chat_id, user_id):
+    chat_id, user_id = int(chat_id), int(user_id)
+    user_stats.setdefault(chat_id, {})
+    user_stats[chat_id][user_id] = user_stats[chat_id].get(user_id, 0) + 1
+    save_stats()
+
+
+# ==================== КАРТОЧКИ ====================
+def load_cards_data():
+    os.makedirs("/app/shared", exist_ok=True)
+    default_cards = {
+        "common_1": {"name": "Атлас", "rarity": "обычная",
+                     "file_id": "AgACAgIAAxkBAAInf2qWul0Ge41cc-qr_grWPmHgtWhNAAKsH2sbFcKwSN8vUM89f1BZAQADAgADeQADPQQ"},
+        "common_2": {"name": "Лысый Атлас", "rarity": "обычная",
+                     "file_id": "AgACAgIAAxkBAAInmGqWyDv-LxsJ5KfarMoXlN0ijBz7AAKKImsbi6m4SJ-2JgTQoZWcAQADAgADeQADPQQ"},
+        "rare_1": {"name": "Кудрявый Атлас", "rarity": "редкая",
+                   "file_id": "AgACAgIAAxkBAAInn2qWyUEww97gD1i8ZPSKTK-lkdBlAAKfImsbi6m4SPniHV4q3992AQADAgADeQADPQQ"},
+        "rare_2": {"name": "Проказник", "rarity": "редкая",
+                   "file_id": "AgACAgIAAxkBAAIoG2qXBuXziyDulVfs7ONvLwhFVOAmAAIpJGsbi6m4SHsGTJ8d0BS8AQADAgADeAADPQQ"},
+        "epic_1": {"name": "Атлас Мафиози", "rarity": "эпическая",
+                   "file_id": "AgACAgIAAxkBAAIoJGqXCDyox3KSUQ65lYsR99KKhnzvAAItJGsbi6m4SAi6CPAL5tCEAQADAgADeAADPQQ"},
+        "epic_2": {"name": "Атлас Мудрец", "rarity": "эпическая",
+                   "file_id": "AgACAgIAAxkBAAIoLWqXCUrJ8JWLtemYZjUezwRxqI75AAI1JGsbi6m4SOxGxQPxb07SAQADAgADeQADPQQ"},
+        "mythic_1": {"name": "Атлас Эмо", "rarity": "мифическая",
+                     "file_id": "AgACAgIAAxkBAAIoOWqXC8587-jtnoR2skOlkHvIJRoGAAJAJGsbi6m4SNk7Vco6Q0lKAQADAgADeQADPQQ"},
+        "mythic_2": {"name": "4К Атлас", "rarity": "мифическая",
+                     "file_id": "AgACAgIAAxkBAAIoQGqXD_wj6z3DWGzbrNM90qP-1axxAAJZJGsbi6m4SMOzON2frSMqAQADAgADeQADPQQ"},
+        "legendary_1": {"name": "Атлас Б.", "rarity": "легендарная",
+                        "file_id": "AgACAgIAAxkBAAIoR2qXEQAB3zVKIo88pnXl9Bz9FBBiyQACXyRrG4upuEgbwoClJyOkxAEAAwIAA3kAAz0E"},
+        "legendary_2": {"name": "Легендарная карточка 2", "rarity": "легендарная", "file_id": "1111111111"},
+        "secret_1": {"name": "Секретная карточка", "rarity": "секретная", "file_id": "1111111111"},
+    }
+    try:
+        with open(CARDS_DATA_FILE, "r", encoding="utf-8") as f:
+            cards = json.load(f)
+        if not isinstance(cards, dict):
+            cards = {}
+    except FileNotFoundError:
+        cards = {}
+    except json.JSONDecodeError:
+        log.exception("cards_data.json битый")
+        cards = {}
+    cards.update(default_cards)
+    return cards
+
+
+def save_cards_data(cards):
+    with open(CARDS_DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(cards, f, ensure_ascii=False, indent=2)
+
+
+def load_user_cards():
+    os.makedirs("/app/shared", exist_ok=True)
+    try:
+        with open(USER_CARDS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_user_cards(data):
+    with open(USER_CARDS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def load_auction():
+    os.makedirs("/app/shared", exist_ok=True)
+    try:
+        with open(AUCTION_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_auction(data):
+    with open(AUCTION_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def get_user_card_data(user_id):
+    data = load_user_cards()
+    uid = str(user_id)
+    if uid not in data:
+        data[uid] = {"cards": [], "balance": 0, "total_cards": 0, "first_card": False}
+        save_user_cards(data)
+    return data[uid]
+
+
+def save_user_card_data(user_id, user_data):
+    data = load_user_cards()
+    data[str(user_id)] = user_data
+    save_user_cards(data)
+
+
+def generate_card_instance_id():
+    return f"card_{int(time.time()*1000)}_{random.randint(1000,9999)}"
+
+
+def roll_rarity(is_premium=False):
+    rarities = ({"обычная": 5, "редкая": 20, "эпическая": 30, "мифическая": 25, "легендарная": 18, "секретная": 2}
+                if is_premium else
+                {"обычная": 40, "редкая": 25, "эпическая": 20, "мифическая": 10, "легендарная": 4, "секретная": 1})
+    total = sum(rarities.values())
+    roll = random.randint(1, total)
+    cum = 0
+    for r, c in rarities.items():
+        cum += c
+        if roll <= cum:
+            return r
+    return "обычная"
+
+
+def get_card_by_rarity(rarity):
+    cards = load_cards_data()
+    available = [cid for cid, c in cards.items() if c["rarity"] == rarity]
+    if not available:
+        return None, None
+    cid = random.choice(available)
+    return cid, cards[cid]
+
+
+def add_card_to_user(user_id, card_id, card_data):
+    ud = get_user_card_data(user_id)
+    new_card = {
+        "instance_id": generate_card_instance_id(),
+        "card_id": card_id,
+        "name": card_data["name"],
+        "rarity": card_data["rarity"],
+        "file_id": card_data["file_id"],
+    }
+    ud["cards"].append(new_card)
+    ud["total_cards"] += 1
+    if not ud.get("first_card", False):
+        ud["first_card"] = True
+        ud["balance"] = 100
+    save_user_card_data(user_id, ud)
+    return new_card
+
+
+def get_user_balance(user_id):
+    return get_user_card_data(user_id).get("balance", 0)
+
+
+def update_user_balance(user_id, amount):
+    ud = get_user_card_data(user_id)
+    ud["balance"] = ud.get("balance", 0) + amount
+    save_user_card_data(user_id, ud)
+    return ud["balance"]
+
+
+# ==================== IMGBB ====================
+def upload_to_imgbb(image_bytes):
+    url = "https://api.imgbb.com/1/upload"
+    encoded = base64.b64encode(image_bytes).decode('utf-8')
+    payload = {"key": IMGBB_API_KEY, "image": encoded, "name": "meme.jpg", "expiration": 86400}
+    try:
+        resp = requests.post(url, data=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        return data["data"]["url"] if data.get("success") else None
+    except Exception as e:
+        log.error(f"ImgBB: {e}")
+        return None
+
+
+# ==================== ПЕРЕВОД ====================
+def translate_text(text, target_lang='en'):
+    try:
+        return GoogleTranslator(source='auto', target=target_lang).translate(text)
+    except Exception as e:
+        log.error(f"Перевод: {e}")
+        return text
+
+
+# ==================== КУЛДАУНЫ ====================
+def load_user_groups():
+    global user_groups
+    if os.path.exists(USER_GROUPS_FILE):
+        try:
+            with open(USER_GROUPS_FILE, 'r', encoding='utf-8') as f:
+                user_groups = {int(k): v for k, v in json.load(f).items()}
+        except Exception:
+            user_groups = {}
+
+
+def save_user_groups():
+    try:
+        with open(USER_GROUPS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(user_groups, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def get_cd(chat_id, command):
+    if chat_id not in chat_cooldowns:
+        chat_cooldowns[chat_id] = {'folk': 60, 'litvin': 60, 'bred': 60, 'search': 600, 'voice': 30}
+    return chat_cooldowns[chat_id].get(command, 60 if command != 'search' else 600)
+
+
+def get_cd_dict(command):
+    return {'folk': cooldowns_folk, 'litvin': cooldowns_litvin, 'bred': cooldowns_bred,
+            'search': cooldowns_search, 'voice': cooldowns_voice}.get(command, {})
+
+
+def check_cd(chat_id, user_id, command):
+    duration = get_cd(chat_id, command)
+    if duration == 0:
+        return False, None
+    cd = get_cd_dict(command)
+    key = (chat_id, user_id)
+    now = datetime.now()
+    if key in cd and (now - cd[key]) < timedelta(seconds=duration):
+        return True, cd[key] + timedelta(seconds=duration) - now
+    return False, None
+
+
+def use_cd(chat_id, user_id, command):
+    get_cd_dict(command)[(chat_id, user_id)] = datetime.now()
+
+
+# ==================== UNSPLASH ====================
+async def search_unsplash(query, per_page=10):
+    url = "https://api.unsplash.com/search/photos"
+    headers = {"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"}
+    params = {"query": query, "per_page": per_page, "page": 1}
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, headers=headers, params=params) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+                return [item["urls"]["regular"] for item in data.get("results", [])]
+        except Exception as e:
+            log.error(f"Unsplash: {e}")
+            return []
+
 
 # ==================== ВОПРОСЫ ДЛЯ /spin ====================
 SPIN_QUESTIONS = [
@@ -384,7 +646,7 @@ ANIMALS = [
     {"name": "Крокодил", "emoji": "🐊", "description": "Ты — крокодил! Ты скрываешь свои эмоции, но внутри ты эмоциональный и иногда пускаешь слезу."},
 ]
 
-# ==================== СТИКЕРЫ (ВСТАВЬ СВОИ) ====================
+# ==================== СТИКЕРЫ ====================
 ALL_STICKERS = [
     "CAACAgIAAxUAAWokXU38_MuMDT7hhvRuZctYuCKJAALIoAACX-ToSLg5DDhF1X44OwQ",
     "CAACAgIAAxUAAWokXU3n6LDpd626aZfX7VT1CippAAKapAAC1p_wSAAByejMhUYpHjsE",
@@ -727,1052 +989,121 @@ bred_stickers = [
     "CAACAgIAAxUAAWokZOpsqDAdFQ6r8cerAAHKHqhHgQACUYwAAvpheUjgqXeeJFOeoTsE",
     "CAACAgIAAxUAAWokZOqiAXiA3711Q_TyiPhyFzALAALakwACwD55SBox3domPjGROwQ",
     "CAACAgIAAxUAAWokZOrG40e6MTW66zTsxm4Z-loOAAJOmAACHOB4SE3Urosl5Hw4OwQ",
-]
-
-# ==================== СЛОВАРИ ====================
-cooldowns_folk = {}
-cooldowns_litvin = {}
-cooldowns_bred = {}
-cooldowns_search = {}
-cooldowns_voice = {}
-chat_cooldowns = {}
-pending_cooldown_input = {}
-
-user_stats = {}
-games = {}
-game_timers = {}
-user_groups = {}
-
-logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
-
-# ==================== ФУНКЦИИ ДЛЯ РЕЙТИНГА ====================
-def load_stats():
-    global user_stats
-    if os.path.exists(USER_STATS_FILE):
-        try:
-            with open(USER_STATS_FILE, 'r', encoding='utf-8') as f:
-                user_stats = json.load(f)
-                user_stats = {int(k): {int(uid): count for uid, count in v.items()} 
-                              for k, v in user_stats.items()}
-        except:
-            user_stats = {}
-
-def save_stats():
-    try:
-        with open(USER_STATS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(user_stats, f, ensure_ascii=False, indent=2)
-    except:
-        pass
-
-def add_activity(chat_id, user_id):
-    chat_id = int(chat_id)
-    user_id = int(user_id)
-    if chat_id not in user_stats:
-        user_stats[chat_id] = {}
-    user_stats[chat_id][user_id] = user_stats[chat_id].get(user_id, 0) + 1
-    save_stats()
-
-# ==================== КАРТОЧКИ (ФУНКЦИИ) ====================
-def load_cards_data():
-    """Загружает каталог карточек, сохраняя остальные записи."""
-    os.makedirs("/app/shared", exist_ok=True)
-
-    default_cards = {
-        "common_1": {
-            "name": "Атлас",
-            "rarity": "обычная",
-            "file_id": "AgACAgIAAxkBAAInf2qWul0Ge41cc-qr_grWPmHgtWhNAAKsH2sbFcKwSN8vUM89f1BZAQADAgADeQADPQQ",
-        },
-        "common_2": {
-            "name": "Лысый Атлас",
-            "rarity": "обычная",
-            "file_id": "AgACAgIAAxkBAAInmGqWyDv-LxsJ5KfarMoXlN0ijBz7AAKKImsbi6m4SJ-2JgTQoZWcAQADAgADeQADPQQ",
-        },
-        "rare_1": {
-            "name": "Кудрявый Атлас",
-            "rarity": "редкая",
-            "file_id": "AgACAgIAAxkBAAInn2qWyUEww97gD1i8ZPSKTK-lkdBlAAKfImsbi6m4SPniHV4q3992AQADAgADeQADPQQ",
-        },
-        "rare_2": {
-            "name": "Проказник",
-            "rarity": "редкая",
-            "file_id": "AgACAgIAAxkBAAIoG2qXBuXziyDulVfs7ONvLwhFVOAmAAIpJGsbi6m4SHsGTJ8d0BS8AQADAgADeAADPQQ",
-        },
-        "epic_1": {
-            "name": "Атлас Мафиози",
-            "rarity": "эпическая",
-            "file_id": "AgACAgIAAxkBAAIoJGqXCDyox3KSUQ65lYsR99KKhnzvAAItJGsbi6m4SAi6CPAL5tCEAQADAgADeAADPQQ",
-        },
-        "epic_2": {
-            "name": "Атлас Мудрец",
-            "rarity": "эпическая",
-            "file_id": "AgACAgIAAxkBAAIoLWqXCUrJ8JWLtemYZjUezwRxqI75AAI1JGsbi6m4SOxGxQPxb07SAQADAgADeQADPQQ",
-        },
-        "mythic_1": {
-            "name": "Атлас Эмо",
-            "rarity": "мифическая",
-            "file_id": "AgACAgIAAxkBAAIoOWqXC8587-jtnoR2skOlkHvIJRoGAAJAJGsbi6m4SNk7Vco6Q0lKAQADAgADeQADPQQ",
-        },
-        "mythic_2": {
-            "name": "4К Атлас",
-            "rarity": "мифическая",
-            "file_id": "AgACAgIAAxkBAAIoQGqXD_wj6z3DWGzbrNM90qP-1axxAAJZJGsbi6m4SMOzON2frSMqAQADAgADeQADPQQ",
-        },
-        "legendary_1": {
-            "name": "Атлас Б.",
-            "rarity": "легендарная",
-            "file_id": "AgACAgIAAxkBAAIoR2qXEQAB3zVKIo88pnXl9Bz9FBBiyQACXyRrG4upuEgbwoClJyOkxAEAAwIAA3kAAz0E",
-        },
-        "legendary_2": {
-            "name": "Легендарная карточка 2",
-            "rarity": "легендарная",
-            "file_id": "1111111111",
-        },
-        "secret_1": {
-            "name": "Секретная карточка",
-            "rarity": "секретная",
-            "file_id": "1111111111",
-        },
-    }
-
-    try:
-        with open(CARDS_DATA_FILE, "r", encoding="utf-8") as f:
-            cards = json.load(f)
-
-        if not isinstance(cards, dict):
-            logging.error("Каталог карточек должен быть JSON-объектом.")
-            cards = {}
-
-    except FileNotFoundError:
-        cards = {}
-
-    except json.JSONDecodeError:
-        logging.exception(
-            "Не удалось прочитать cards_data.json. "
-            "Используется встроенный каталог."
-        )
-        cards = {}
-
-    # Обновляем указанные карточки из кода.
-    # Остальные карточки из существующего каталога сохраняются.
-    cards.update(default_cards)
-
-    return cards
-
-def save_cards_data(cards):
-    with open(CARDS_DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(cards, f, ensure_ascii=False, indent=2)
-
-def load_user_cards():
-    os.makedirs("/app/shared", exist_ok=True)
-    try:
-        with open(USER_CARDS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-def save_user_cards(data):
-    with open(USER_CARDS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-def load_auction():
-    os.makedirs("/app/shared", exist_ok=True)
-    try:
-        with open(AUCTION_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-def save_auction(data):
-    with open(AUCTION_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-def get_user_card_data(user_id):
-    data = load_user_cards()
-    user_id_str = str(user_id)
-    if user_id_str not in data:
-        data[user_id_str] = {
-            "cards": [],
-            "balance": 0,
-            "total_cards": 0,
-            "first_card": False
-        }
-        save_user_cards(data)
-    return data[user_id_str]
-
-def save_user_card_data(user_id, user_data):
-    data = load_user_cards()
-    data[str(user_id)] = user_data
-    save_user_cards(data)
-
-def generate_card_instance_id():
-    import time
-    return f"card_{int(time.time()*1000)}_{random.randint(1000,9999)}"
-
-def roll_rarity(is_premium=False):
-    if is_premium:
-        rarities = {
-            "обычная": 5,
-            "редкая": 20,
-            "эпическая": 30,
-            "мифическая": 25,
-            "легендарная": 18,
-            "секретная": 2
-        }
-    else:
-        rarities = {
-            "обычная": 40,
-            "редкая": 25,
-            "эпическая": 20,
-            "мифическая": 10,
-            "легендарная": 4,
-            "секретная": 1
-        }
-    total = sum(rarities.values())
-    roll = random.randint(1, total)
-    cumulative = 0
-    for rarity, chance in rarities.items():
-        cumulative += chance
-        if roll <= cumulative:
-            return rarity
-    return "обычная"
-
-def get_card_by_rarity(rarity):
-    cards = load_cards_data()
-    available = [card_id for card_id, card in cards.items() if card["rarity"] == rarity]
-    if not available:
-        return None, None
-    card_id = random.choice(available)
-    return card_id, cards[card_id]
-
-def add_card_to_user(user_id, card_id, card_data):
-    user_data = get_user_card_data(user_id)
-    new_card = {
-        "instance_id": generate_card_instance_id(),
-        "card_id": card_id,
-        "name": card_data["name"],
-        "rarity": card_data["rarity"],
-        "file_id": card_data["file_id"]
-    }
-    user_data["cards"].append(new_card)
-    user_data["total_cards"] += 1
-    if not user_data.get("first_card", False):
-        user_data["first_card"] = True
-        user_data["balance"] = 100
-    save_user_card_data(user_id, user_data)
-    return new_card
-
-def get_user_balance(user_id):
-    user_data = get_user_card_data(user_id)
-    return user_data.get("balance", 0)
-
-def update_user_balance(user_id, amount):
-    user_data = get_user_card_data(user_id)
-    user_data["balance"] = user_data.get("balance", 0) + amount
-    save_user_card_data(user_id, user_data)
-    return user_data["balance"]
-
-
-
-# ==================== ЗАГРУЗКА НА IMGBB ====================
-def upload_to_imgbb(image_bytes):
-    url = "https://api.imgbb.com/1/upload"
-    encoded_image = base64.b64encode(image_bytes).decode('utf-8')
-    payload = {
-        "key": IMGBB_API_KEY,
-        "image": encoded_image,
-        "name": "meme.jpg",
-        "expiration": 86400
-    }
-    try:
-        resp = requests.post(url, data=payload, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("success"):
-            return data["data"]["url"]
-        else:
-            logging.error(f"Ошибка ImgBB: {data}")
-            return None
-    except Exception as e:
-        logging.error(f"Исключение при загрузке на ImgBB: {e}")
-        return None
-
-# ==================== ПЕРЕВОД ====================
-def translate_text(text, target_lang='en'):
-    try:
-        translated = GoogleTranslator(source='auto', target=target_lang).translate(text)
-        return translated
-    except Exception as e:
-        logging.error(f"Ошибка перевода: {e}")
-        return text
-
-# ==================== КУЛДАУНЫ ====================
-def load_user_groups():
-    global user_groups
-    if os.path.exists(USER_GROUPS_FILE):
-        try:
-            with open(USER_GROUPS_FILE, 'r', encoding='utf-8') as f:
-                user_groups = {int(k): v for k, v in json.load(f).items()}
-        except:
-            user_groups = {}
-
-def save_user_groups():
-    try:
-        with open(USER_GROUPS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(user_groups, f, ensure_ascii=False, indent=2)
-    except:
-        pass
-
-def get_cd(chat_id, command):
-    if chat_id not in chat_cooldowns:
-        chat_cooldowns[chat_id] = {
-            'folk': 60,
-            'litvin': 60,
-            'bred': 60,
-            'search': 600,
-            'voice': 30
-        }
-    return chat_cooldowns[chat_id].get(command, 60 if command != 'search' else 600)
-
-def get_cd_dict(command):
-    if command == 'folk':
-        return cooldowns_folk
-    elif command == 'litvin':
-        return cooldowns_litvin
-    elif command == 'bred':
-        return cooldowns_bred
-    elif command == 'search':
-        return cooldowns_search
-    elif command == 'voice':
-        return cooldowns_voice
-    return {}
-
-def check_cd(chat_id, user_id, command):
-    duration = get_cd(chat_id, command)
-    if duration == 0:
-        return False, None
-    cd = get_cd_dict(command)
-    key = (chat_id, user_id)
-    now = datetime.now()
-    if key in cd and (now - cd[key]) < timedelta(seconds=duration):
-        remain = cd[key] + timedelta(seconds=duration) - now
-        return True, remain
-    return False, None
-
-def use_cd(chat_id, user_id, command):
-    get_cd_dict(command)[(chat_id, user_id)] = datetime.now()
-
-# ==================== UNSPLASH ====================
-async def search_unsplash(query, per_page=10):
-    url = "https://api.unsplash.com/search/photos"
-    headers = {"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"}
-    params = {"query": query, "per_page": per_page, "page": 1}
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url, headers=headers, params=params) as resp:
-                if resp.status != 200:
-                    logging.error(f"Unsplash ошибка: {resp.status}")
-                    return []
-                data = await resp.json()
-                results = data.get("results", [])
-                return [item["urls"]["regular"] for item in results]
-        except Exception as e:
-            logging.error(f"Ошибка Unsplash: {e}")
-            return []
-
-# ==================== ТАЙМАУТ ИГР ====================
-async def auto_end_game(chat_id, context: ContextTypes.DEFAULT_TYPE):
-    await asyncio.sleep(60)
-    if chat_id in games and games[chat_id]["active"]:
-        games[chat_id]["active"] = False
-        try:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="⏰ **Игра завершена по таймауту!**\nТеперь можно запустить новую: `/game`",
-                parse_mode="Markdown"
-            )
-        except:
-            pass
-        if chat_id in game_timers:
-            del game_timers[chat_id]
-
-# ==================== ДОНАТЫ ====================
-async def donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private":
-        await update.message.reply_text("❌ Эта команда доступна только в личных сообщениях!")
-        return
-    
-    user_id = update.effective_user.id
-    kb = [
-        [
-            InlineKeyboardButton("⭐ 10 звезд", callback_data=f"donate_10"),
-            InlineKeyboardButton("⭐ 50 звезд", callback_data=f"donate_50"),
-        ],
-        [
-            InlineKeyboardButton("⭐ 100 звезд", callback_data=f"donate_100"),
-            InlineKeyboardButton("⭐ 200 звезд", callback_data=f"donate_200"),
-        ],
-        [
-            InlineKeyboardButton("⭐ 500 звезд", callback_data=f"donate_500"),
-        ],
-        [
-            InlineKeyboardButton("✏️ Своя сумма", callback_data=f"donate_custom"),
-        ],
-    ]
-    await update.message.reply_text(
-        "🌟 **Поддержи бота звёздами!**\n\n"
-        "Выбери сумму доната в звёздах Telegram. После оплаты ты получишь уведомление, а бот запомнит твой вклад.",
-        reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode="Markdown"
-    )
-
-async def donate_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    data = query.data
-    
-    if data == "donate_custom":
-        temp_donation_amounts[user_id] = 0
-        await query.edit_message_text(
-            "✏️ **Настрой сумму доната:**\n\n"
-            f"💰 Текущая сумма: **0 звёзд**\n\n"
-            "Используй кнопки ниже для изменения суммы.\n"
-            "Когда будет готово, нажми «Отправить».",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("➕ +5", callback_data="donate_adj_+5"),
-                    InlineKeyboardButton("➕ +10", callback_data="donate_adj_+10"),
-                ],
-                [
-                    InlineKeyboardButton("➖ -5", callback_data="donate_adj_-5"),
-                    InlineKeyboardButton("➖ -10", callback_data="donate_adj_-10"),
-                ],
-                [
-                    InlineKeyboardButton("✅ Отправить", callback_data="donate_send"),
-                    InlineKeyboardButton("❌ Отменить", callback_data="donate_cancel"),
-                ],
-            ]),
-            parse_mode="Markdown"
-        )
-        return
-    
-    if data.startswith("donate_adj_"):
-        if user_id not in temp_donation_amounts:
-            await query.edit_message_text("❌ Ошибка. Начни заново с /donate")
-            return
-        delta = int(data.split("_")[-1])
-        new_amount = temp_donation_amounts[user_id] + delta
-        if new_amount < 0:
-            new_amount = 0
-        temp_donation_amounts[user_id] = new_amount
-        await query.edit_message_text(
-            f"✏️ **Настрой сумму доната:**\n\n"
-            f"💰 Текущая сумма: **{new_amount} звёзд**\n\n"
-            "Используй кнопки ниже для изменения суммы.\n"
-            "Когда будет готово, нажми «Отправить».",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("➕ +5", callback_data="donate_adj_+5"),
-                    InlineKeyboardButton("➕ +10", callback_data="donate_adj_+10"),
-                ],
-                [
-                    InlineKeyboardButton("➖ -5", callback_data="donate_adj_-5"),
-                    InlineKeyboardButton("➖ -10", callback_data="donate_adj_-10"),
-                ],
-                [
-                    InlineKeyboardButton("✅ Отправить", callback_data="donate_send"),
-                    InlineKeyboardButton("❌ Отменить", callback_data="donate_cancel"),
-                ],
-            ]),
-            parse_mode="Markdown"
-        )
-        return
-    
-    if data == "donate_cancel":
-        if user_id in temp_donation_amounts:
-            del temp_donation_amounts[user_id]
-        await query.edit_message_text("❌ Отменено.")
-        return
-    
-    if data == "donate_send":
-        if user_id not in temp_donation_amounts:
-            await query.edit_message_text("❌ Ошибка. Начни заново с /donate")
-            return
-        amount = temp_donation_amounts.pop(user_id)
-        if amount <= 0:
-            await query.edit_message_text("❌ Сумма должна быть больше 0 звёзд!")
-            return
-        await create_invoice_and_send(query, user_id, amount, context)
-        return
-    
-    try:
-        amount = int(data.split("_")[1])
-    except:
-        await query.edit_message_text("❌ Ошибка! Попробуй снова.")
-        return
-    await create_invoice_and_send(query, user_id, amount, context)
-
-async def create_invoice_and_send(query, user_id, amount, context):
-    try:
-        invoice_link = await context.bot.create_invoice_link(
-            title="Донат в Folk Valley Bot",
-            description=f"Пожертвование {amount} звёзд",
-            payload=f"donation_{user_id}_{amount}_{int(time.time())}",
-            provider_token="",
-            currency="XTR",
-            prices=[{"label": f"{amount} звёзд", "amount": amount}]
-        )
-        await query.edit_message_text(
-            f"🌟 **Ссылка на оплату создана!**\n\n"
-            f"Сумма: **{amount} звёзд**\n"
-            f"Нажми на кнопку ниже, чтобы оплатить:\n\n"
-            f"[Оплатить {amount} звёзд]({invoice_link})",
-            parse_mode="Markdown",
-            disable_web_page_preview=True
-        )
-    except Exception as e:
-        await query.edit_message_text(f"❌ Ошибка создания счёта: {e}")
-
-async def payment_successful(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.effective_message
-    payment = message.successful_payment if message else None
-    user = update.effective_user
-    if not payment or not user:
-        return
-    if payment.currency != "XTR":
-        logging.error("Отклонено уведомление об оплате в неизвестной валюте: %s", payment.currency)
-        return
-
-    charge_id = payment.telegram_payment_charge_id
-    processed = context.application.bot_data.setdefault("processed_star_payments", set())
-    if charge_id and charge_id in processed:
-        logging.warning("Повторное уведомление Telegram Stars: %s", charge_id)
-        return
-
-    amount = payment.total_amount
-    add_donation(user.id, amount)
-    if charge_id:
-        processed.add(charge_id)
-
-    await message.reply_text(
-        f"🌟 Спасибо за донат!\n\n"
-        f"Ты пожертвовал {amount} звёзд.\n"
-        f"Твой вклад помогает боту развиваться! 🙌"
-    )
-
-
-async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Validate Telegram Stars invoice data before Telegram completes a payment."""
-    query = update.pre_checkout_query
-    if query is None:
-        return
-    try:
-        parts = query.invoice_payload.split("_", 3)
-        valid_payload = len(parts) == 4 and parts[0] == "donation"
-        owner_id = int(parts[1]) if valid_payload else None
-        expected_amount = int(parts[2]) if valid_payload else None
-        valid = (
-            valid_payload
-            and owner_id == query.from_user.id
-            and query.currency == "XTR"
-            and query.total_amount == expected_amount
-            and expected_amount is not None
-            and expected_amount > 0
-        )
-    except (TypeError, ValueError, IndexError):
-        valid = False
-    if not valid:
-        await query.answer(
-            ok=False,
-            error_message="Данные счёта не совпадают. Создай новый счёт через /donate.",
-        )
-        return
-    await query.answer(ok=True)
-
-
-# ==================== /spin ====================
-async def spin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Pick a previously seen active group member; Bot API cannot list all members."""
-    chat = update.effective_chat
-    message = update.effective_message
-    if not chat or not message:
-        return
-    if chat.type not in ("group", "supergroup"):
-        await message.reply_text("🎲 Эта команда работает только в группах!")
-        return
-
-    known_ids = list(user_stats.get(chat.id, {}).keys())[:200]
-    candidates = []
-    for member_id in known_ids:
-        try:
-            member = await context.bot.get_chat_member(chat_id=chat.id, user_id=int(member_id))
-            if member.user and not member.user.is_bot and member.status not in ("left", "kicked"):
-                candidates.append(member.user)
-        except Exception as exc:
-            logging.debug("Не удалось проверить участника %s в %s: %s", member_id, chat.id, exc)
-
-    if not candidates:
-        await message.reply_text(
-            "Пока не знаю активных участников для рулетки. Пусть участники напишут сообщение или воспользуются командой бота, затем попробуй снова."
-        )
-        return
-
-    target = random.choice(candidates)
-    question = random.choice(SPIN_QUESTIONS)
-    target_name = f"@{target.username}" if target.username else (target.first_name or "Участник")
-    await message.reply_text(
-        f"🎲 Чат-рулетка!\n\n👤 Выпал: {target_name}\n❓ Вопрос: {question}"
-    )
-
-async def offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private":
-        await update.message.reply_text("❌ Эта команда доступна только в личных сообщениях!")
-        return
-    
-    text = " ".join(context.args) if context.args else ""
-    if not text:
-        await update.message.reply_text(
-            f"📋 **Правила отправки предложений:**\n\n"
-            f"{OFFER_RULES_URL}\n\n"
-            f"Напиши `/offer Твоя идея` — и она уйдёт админу.",
-            parse_mode="Markdown",
-            disable_web_page_preview=True
-        )
-        return
-    
-    user = update.effective_user
-    user_id = user.id
-    user_name = f"@{user.username}" if user.username else user.first_name
-    
-    # Экранируем текст пользователя, чтобы он не ломал Markdown
-    safe_text = escape_markdown(text)
-    
-    kb = [
-        [
-            InlineKeyboardButton("✅ Принять", callback_data=f"offer_accept_{user_id}"),
-            InlineKeyboardButton("❌ Отклонить", callback_data=f"offer_reject_{user_id}"),
         ]
-    ]
-    
-    try:
-        await context.bot.send_message(
-            chat_id=ADMIN_ID,
-            text=f"📩 **Новая идея от {user_name}** (ID: `{user_id}`)\n\n{safe_text}",
-            reply_markup=InlineKeyboardMarkup(kb),
-            parse_mode="Markdown"
-        )
-        await update.message.reply_text("✅ Твоя идея отправлена админу! Спасибо за вклад! 🙌")
-    except Exception as e:
-        logging.error(f"Ошибка отправки предложения: {e}")
-        await update.message.reply_text(f"❌ Ошибка отправки. Попробуй позже.")
 
 
-async def offer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if query.from_user.id != ADMIN_ID:
-        await query.answer("❌ Только админ может это делать!", show_alert=True)
-        return
-    
-    data = query.data
-    parts = data.split("_")
-    action = parts[1]
-    target_user_id = int(parts[2])
-    
-    if action == "accept":
-        response_text = "🌟 **Спасибо за идею!** Возможно, ты увидишь её в следующем обновлении!"
-    else:
-        response_text = "❌ **Ваша идея отклонена.** Возможно, она не подходит по правилам или не по теме."
-    
-    try:
-        await context.bot.send_message(chat_id=target_user_id, text=response_text, parse_mode="Markdown")
-    except Exception as e:
-        logging.error(f"Не удалось отправить ответ пользователю {target_user_id}: {e}")
-    
-    await query.edit_message_text(
-        text=query.message.text + f"\n\n✅ {action.capitalize()} (ответ отправлен)",
-        reply_markup=None
-    )
-    await query.answer("✅ Готово!")
+# ============================================================
+# ХЭНДЛЕРЫ: КОМАНДЫ
+# ============================================================
 
-# ==================== АДМИН-КОМАНДЫ (рассылки) ====================
-async def chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Нет прав!")
-        return
-    
-    try:
-        with open(CHATS_DB_FILE, "r", encoding="utf-8") as f:
-            chat_ids = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        await update.message.reply_text("📭 Нет сохранённых чатов.")
-        return
-    
-    if not chat_ids:
-        await update.message.reply_text("📭 Список чатов пуст.")
-        return
-    
-    result = f"📊 **Всего чатов:** {len(chat_ids)}\n\n"
-    for chat_id in chat_ids[:20]:
-        result += f"`{chat_id}`\n"
-    if len(chat_ids) > 20:
-        result += f"\n... и ещё {len(chat_ids) - 20} чатов"
-    
-    kb = [[InlineKeyboardButton("📨 Разослать всем", callback_data="broadcast_all")]]
-    await update.message.reply_text(
-        result,
-        reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode="Markdown"
-    )
-
-async def broadcast_all_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    if user_id != ADMIN_ID:
-        await query.edit_message_text("❌ Нет прав!")
-        return
-    
-    pending_broadcast_all[user_id] = True
-    await query.edit_message_text(
-        "✏️ **Введи текст для рассылки во все чаты.**\n"
-        "Просто напиши сообщение.\n"
-        "Чтобы отменить — напиши /cancel.",
-        parse_mode="Markdown"
-    )
-
-async def handle_broadcast_all_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id != ADMIN_ID:
-        return
-    
-    if user_id not in pending_broadcast_all:
-        return
-    
-    del pending_broadcast_all[user_id]
-    text = update.message.text.strip()
-    if not text:
-        await update.message.reply_text("❌ Пустое сообщение. Отменено.")
-        return
-    
-    try:
-        with open(CHATS_DB_FILE, "r", encoding="utf-8") as f:
-            chat_ids = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        await update.message.reply_text("❌ Нет сохранённых чатов!")
-        return
-    
-    if not chat_ids:
-        await update.message.reply_text("❌ Список чатов пуст!")
-        return
-    
-    status_msg = await update.message.reply_text(f"🚀 Начинаю рассылку в {len(chat_ids)} чатов...")
-    
-    sent = 0
-    failed = 0
-    for chat_id in chat_ids:
-        try:
-            await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
-            sent += 1
-        except:
-            failed += 1
-        await asyncio.sleep(0.3)
-    
-    await status_msg.edit_text(
-        f"✅ **Рассылка завершена!**\n\n"
-        f"📤 Отправлено: {sent}\n"
-        f"❌ Ошибок: {failed}\n"
-        f"📊 Всего чатов: {len(chat_ids)}",
-        parse_mode="Markdown"
-    )
-
-async def cancel_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id in pending_broadcast_all:
-        del pending_broadcast_all[user_id]
-        await update.message.reply_text("❌ Отменено.")
-    else:
-        await update.message.reply_text("Нет активной рассылки.")
-
-async def go(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id != ADMIN_ID:
-        await update.message.reply_text("❌ У тебя нет прав для этой команды!")
-        return
-    
-    text = " ".join(context.args) if context.args else ""
-    if not text:
-        await update.message.reply_text(
-            "❌ Напиши текст для рассылки:\n`/go Текст сообщения`",
-            parse_mode="Markdown"
-        )
-        return
-    
-    try:
-        with open(CHATS_DB_FILE, "r", encoding="utf-8") as f:
-            chat_ids = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        await update.message.reply_text("❌ Нет сохранённых чатов!")
-        return
-    
-    if not chat_ids:
-        await update.message.reply_text("❌ Список чатов пуст!")
-        return
-    
-    status_msg = await update.message.reply_text(f"🚀 Начинаю рассылку в {len(chat_ids)} чатов...")
-    
-    sent = 0
-    failed = 0
-    for chat_id in chat_ids:
-        try:
-            await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
-            sent += 1
-        except:
-            failed += 1
-        await asyncio.sleep(0.3)
-    
-    await status_msg.edit_text(
-        f"✅ **Рассылка завершена!**\n\n"
-        f"📤 Отправлено: {sent}\n"
-        f"❌ Ошибок: {failed}\n"
-        f"📊 Всего чатов: {len(chat_ids)}",
-        parse_mode="Markdown"
-    )
-
-async def donate_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id != ADMIN_ID:
-        await update.message.reply_text("❌ У тебя нет прав для этой команды!")
-        return
-    
-    text = " ".join(context.args) if context.args else ""
-    if not text:
-        await update.message.reply_text(
-            "❌ Напиши текст для рассылки донатерам:\n`/donate_broadcast Текст`",
-            parse_mode="Markdown"
-        )
-        return
-    
-    donations = load_donations()
-    if not donations:
-        await update.message.reply_text("📭 Нет донатеров!")
-        return
-    
-    user_ids = [int(uid) for uid in donations.keys()]
-    status_msg = await update.message.reply_text(f"🚀 Начинаю рассылку {len(user_ids)} донатерам...")
-    
-    sent = 0
-    failed = 0
-    for uid in user_ids:
-        try:
-            await context.bot.send_message(chat_id=uid, text=text, parse_mode="Markdown")
-            sent += 1
-        except:
-            failed += 1
-        await asyncio.sleep(0.3)
-    
-    await status_msg.edit_text(
-        f"✅ **Рассылка донатерам завершена!**\n\n"
-        f"📤 Отправлено: {sent}\n"
-        f"❌ Ошибок: {failed}\n"
-        f"📊 Всего донатеров: {len(user_ids)}",
-        parse_mode="Markdown"
-    )
-
-async def donates(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id != ADMIN_ID:
-        await update.message.reply_text("❌ У тебя нет прав для этой команды!")
-        return
-    
-    donations = load_donations()
-    if not donations:
-        await update.message.reply_text("📭 Пока нет донатов!")
-        return
-    
-    sorted_donations = sorted(
-        donations.items(),
-        key=lambda x: x[1]["total"],
-        reverse=True
-    )
-    
-    total_stars = sum(d["total"] for d in donations.values())
-    total_users = len(donations)
-    
-    result = f"🌟 **Статистика донатов:**\n\n"
-    result += f"📊 Всего собрано: **{total_stars} звёзд**\n"
-    result += f"👤 Уникальных донатеров: **{total_users}**\n\n"
-    result += "🏆 **Топ донатеров:**\n"
-    
-    for i, (uid, data) in enumerate(sorted_donations[:10], 1):
-        try:
-            user_info = await context.bot.get_chat(int(uid))
-            name = user_info.first_name or "Пользователь"
-            if user_info.username:
-                name = f"@{user_info.username}"
-        except:
-            name = f"ID: {uid}"
-        
-        result += f"{i}. **{name}** — {data['total']} звёзд ({data['count']} донатов)\n"
-    
-    await update.message.reply_text(result, parse_mode="Markdown")
-
-# ==================== /factme и /animal ====================
-async def factme(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat_id(update.effective_chat.id)
-    add_activity(update.effective_chat.id, update.effective_user.id)
-    user = update.effective_user
-    fact = random.choice(FACTS)
-    await update.message.reply_text(
-        f"🧠 **Факт о тебе, {user.first_name}:**\n\n{fact}",
-        parse_mode="Markdown"
-    )
-
-async def animal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat_id(update.effective_chat.id)
-    add_activity(update.effective_chat.id, update.effective_user.id)
-    animal_data = random.choice(ANIMALS)
-    await update.message.reply_text(
-        f"🐾 **Ты — {animal_data['name']}!**\n\n{animal_data['emoji']} {animal_data['description']}",
-        parse_mode="Markdown"
-    )
-
-# ==================== ПРИВЕТСТВИЕ ====================
-async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat_id(update.effective_chat.id)
-    add_activity(update.effective_chat.id, update.effective_user.id)
-    for member in update.message.new_chat_members:
-        if member.id == context.bot.id:
-            continue
-        if member.username:
-            await update.message.reply_text(f"h @{member.username} !")
-        else:
-            await update.message.reply_text(f"h {member.first_name} !")
-
-# ==================== КОМАНДЫ ====================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat_id(update.effective_chat.id)
-    add_activity(update.effective_chat.id, update.effective_user.id)
-    if update.effective_chat.type == "private":
-        keyboard = [[InlineKeyboardButton("👤 Профиль", web_app=WebAppInfo(url=MINI_APP_URL))]]
-        await update.message.reply_text(
+@router.message(Command("start"))
+async def start(message: Message):
+    save_chat_id(message.chat.id)
+    add_activity(message.chat.id, message.from_user.id)
+    if message.chat.type == "private":
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👤 Профиль", web_app=WebAppInfo(url=MINI_APP_URL))]
+        ])
+        await message.answer(
             "👋 Привет! Я бот Folk Valley.\n\n"
             "🎮 **Игры:**\n"
-            "• `/game` — выбрать игру (угадай число, КНБ, викторина)\n"
-            "• Для ответа используй `/answer` (только для создателя игры)\n"
-            "• `/top` — топ активных пользователей\n"
+            "• `/game` — выбрать игру\n"
+            "• `/answer` — ответ в игре\n"
+            "• `/top` — топ активных\n"
             "• `/spin` — чат-рулетка (только в группах)\n\n"
             "🐱 **Животные:**\n"
-            "• `/cat` — случайный котик\n"
-            "• `/dog` — случайная собачка\n"
-            "• `/animal` — кто ты сегодня?\n\n"
-            "🧠 **Забавное:**\n"
-            "• `/factme` — случайный факт о тебе\n\n"
-            "🌟 **Донат:**\n"
-            "• `/donate` — поддержать бота звёздами (только в ЛС)\n\n"
-            "📩 **Предложка:**\n"
-            "• `/offer` — отправить идею админу (только в ЛС)\n\n"
-            "🎭 **Развлечения:**\n"
-            "• `/folk`, `/litvin`, `/bred` — стикеры\n"
-            "• `/sosat` — бессвязный бред\n"
-            "• `/zabava` — мем из фото + текст (1 верх, 2 низ)\n"
-            "• `/search` — поиск картинок (1 в группе, 3 в лс)\n"
-            "• `/voice` — озвучить текст\n\n"
-            "⚙️ **Управление:**\n"
-            "• `/cooldown` — кулдауны (владелец группы)\n\n"
-            "🔄 **Триггеры:**\n"
-            "• «бугульма», «литвин», «бред» — стикеры\n"
-            "• «мой факт» — случайный факт о тебе\n"
-            "• «моё животное» — кто ты сегодня\n"
-            "• «п» — бот ответит «п»",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            "• `/cat`, `/dog`, `/animal`\n\n"
+            "🧠 `/factme` — факт о тебе\n\n"
+            "🌟 `/donate` — поддержать (в ЛС)\n"
+            "📩 `/offer` — идея админу (в ЛС)\n\n"
+            "🎭 `/folk`, `/litvin`, `/bred`, `/sosat`, `/zabava`, `/search`, `/voice`\n\n"
+            "⚙️ `/cooldown` — кулдауны\n\n"
+            "🃏 `/card`, `/profile`, `/ah`",
+            reply_markup=keyboard,
             parse_mode="Markdown"
         )
     else:
-        await update.message.reply_text("Я в группе! /folk /litvin /bred /sosat /zabava /search /voice /game /top /cat /dog /animal /factme /spin /cooldown")
+        await message.answer("Я в группе! /folk /litvin /bred /sosat /zabava /search /voice /game /top /cat /dog /animal /factme /spin /cooldown")
 
-async def folk(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat_id(update.effective_chat.id)
-    add_activity(update.effective_chat.id, update.effective_user.id)
-    chat_id, user_id = update.effective_chat.id, update.effective_user.id
+
+@router.message(Command("folk"))
+async def folk(message: Message):
+    save_chat_id(message.chat.id)
+    add_activity(message.chat.id, message.from_user.id)
+    chat_id, user_id = message.chat.id, message.from_user.id
     cool, remain = check_cd(chat_id, user_id, 'folk')
     if cool:
-        seconds_left = max(0, int(remain.total_seconds()))
-        m, s = divmod(seconds_left, 60)
-        await update.message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
+        s = max(0, int(remain.total_seconds()))
+        m, sec = divmod(s, 60)
+        await message.answer(f"⏳ {m} мин {sec} сек", reply_to_message_id=message.message_id)
         return
     if not ALL_STICKERS:
-        await update.message.reply_text("Стикеры не загружены.")
+        await message.answer("Стикеры не загружены.")
         return
-    await update.message.reply_sticker(sticker=random.choice(ALL_STICKERS))
+    await message.answer_sticker(sticker=random.choice(ALL_STICKERS))
     use_cd(chat_id, user_id, 'folk')
 
-async def litvin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat_id(update.effective_chat.id)
-    add_activity(update.effective_chat.id, update.effective_user.id)
-    chat_id, user_id = update.effective_chat.id, update.effective_user.id
+
+@router.message(Command("litvin"))
+async def litvin(message: Message):
+    save_chat_id(message.chat.id)
+    add_activity(message.chat.id, message.from_user.id)
+    chat_id, user_id = message.chat.id, message.from_user.id
     cool, remain = check_cd(chat_id, user_id, 'litvin')
     if cool:
-        seconds_left = max(0, int(remain.total_seconds()))
-        m, s = divmod(seconds_left, 60)
-        await update.message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
+        s = max(0, int(remain.total_seconds()))
+        m, sec = divmod(s, 60)
+        await message.answer(f"⏳ {m} мин {sec} сек", reply_to_message_id=message.message_id)
         return
     if not litvin_stickers:
-        await update.message.reply_text("Стикеры не загружены.")
+        await message.answer("Стикеры не загружены.")
         return
-    await update.message.reply_sticker(sticker=random.choice(litvin_stickers))
+    await message.answer_sticker(sticker=random.choice(litvin_stickers))
     use_cd(chat_id, user_id, 'litvin')
 
-async def bred(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat_id(update.effective_chat.id)
-    add_activity(update.effective_chat.id, update.effective_user.id)
-    chat_id, user_id = update.effective_chat.id, update.effective_user.id
+
+@router.message(Command("bred"))
+async def bred(message: Message):
+    save_chat_id(message.chat.id)
+    add_activity(message.chat.id, message.from_user.id)
+    chat_id, user_id = message.chat.id, message.from_user.id
     cool, remain = check_cd(chat_id, user_id, 'bred')
     if cool:
-        seconds_left = max(0, int(remain.total_seconds()))
-        m, s = divmod(seconds_left, 60)
-        await update.message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
+        s = max(0, int(remain.total_seconds()))
+        m, sec = divmod(s, 60)
+        await message.answer(f"⏳ {m} мин {sec} сек", reply_to_message_id=message.message_id)
         return
     if not bred_stickers:
-        await update.message.reply_text("Стикеры не загружены.")
+        await message.answer("Стикеры не загружены.")
         return
-    await update.message.reply_sticker(sticker=random.choice(bred_stickers))
+    await message.answer_sticker(sticker=random.choice(bred_stickers))
     use_cd(chat_id, user_id, 'bred')
 
-async def sosat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat_id(update.effective_chat.id)
-    add_activity(update.effective_chat.id, update.effective_user.id)
+
+@router.message(Command("sosat"))
+async def sosat(message: Message):
+    save_chat_id(message.chat.id)
+    add_activity(message.chat.id, message.from_user.id)
     words = random.choices(RANDOM_WORDS, k=random.randint(3, 6))
-    await update.message.reply_text(" ".join(words))
+    await message.answer(" ".join(words))
 
-# ==================== /zabava (через memegen.link) ====================
-async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat_id(update.effective_chat.id)
-    add_activity(update.effective_chat.id, update.effective_user.id)
-    message = update.message
 
+@router.message(Command("zabava"))
+async def zabava(message: Message):
+    save_chat_id(message.chat.id)
+    add_activity(message.chat.id, message.from_user.id)
     if not message.photo and not (message.reply_to_message and message.reply_to_message.photo):
-        await message.reply_text("📸 Отправь фото с подписью /zabava текст или ответь командой на фото.")
+        await message.answer("📸 Отправь фото с подписью /zabava текст или ответь командой на фото.")
         return
-
-    args = context.args
+    args = get_args(message)
     if not args:
-        await message.reply_text(
-            "❌ Напиши текст.\n\n"
-            "Примеры:\n"
+        await message.answer(
+            "❌ Напиши текст.\n\nПримеры:\n"
             "/zabava 1 Текст сверху\n"
             "/zabava 2 Текст снизу\n"
-            "/zabava 1 Верхний 2 Нижний\n"
-            "Если без цифр, текст будет сверху."
+            "/zabava 1 Верхний 2 Нижний"
         )
         return
-
-    # Парсим текст с маркерами 1 и 2
     try:
         idx1 = args.index("1")
     except ValueError:
@@ -1781,393 +1112,546 @@ async def zabava(update: Update, context: ContextTypes.DEFAULT_TYPE):
         idx2 = args.index("2")
     except ValueError:
         idx2 = -1
-
     top_text = ""
     bottom_text = ""
-
     if idx1 == -1 and idx2 == -1:
         top_text = " ".join(args).strip()
     else:
         if idx1 != -1:
-            if idx2 != -1 and idx2 > idx1:
-                top_parts = args[idx1+1:idx2]
-            else:
-                top_parts = args[idx1+1:]
+            top_parts = args[idx1+1:idx2] if (idx2 != -1 and idx2 > idx1) else args[idx1+1:]
             top_text = " ".join(top_parts).strip()
         if idx2 != -1:
-            if idx1 != -1 and idx1 > idx2:
-                bottom_parts = args[idx2+1:idx1]
-            else:
-                bottom_parts = args[idx2+1:]
+            bottom_parts = args[idx2+1:idx1] if (idx1 != -1 and idx1 > idx2) else args[idx2+1:]
             bottom_text = " ".join(bottom_parts).strip()
-
     if not top_text and not bottom_text:
-        await message.reply_text("❌ Текст не распознан. Пример: /zabava 1 Привет 2 Мир")
+        await message.answer("❌ Текст не распознан.")
         return
-
-    # Скачиваем фото
-    if message.photo:
-        file_id = message.photo[-1].file_id
-    else:
-        file_id = message.reply_to_message.photo[-1].file_id
-
+    file_id = message.photo[-1].file_id if message.photo else message.reply_to_message.photo[-1].file_id
     try:
-        file = await context.bot.get_file(file_id)
+        file = await bot.get_file(file_id)
         img_bytes = io.BytesIO()
-        await file.download_to_memory(img_bytes)
-        img_bytes.seek(0)
-        image_data = img_bytes.read()
+        await bot.download_file(file.file_path, img_bytes)
+        image_data = img_bytes.getvalue()
     except Exception as e:
-        await message.reply_text(f"❌ Ошибка загрузки фото: {e}")
+        await message.answer(f"❌ Ошибка загрузки фото: {e}")
         return
-
-    # Загружаем на ImgBB
     loop = asyncio.get_event_loop()
-    try:
-        photo_url = await loop.run_in_executor(None, upload_to_imgbb, image_data)
-        if not photo_url:
-            await message.reply_text("❌ Не удалось загрузить фото на хостинг (ImgBB).")
-            return
-    except Exception as e:
-        await message.reply_text(f"❌ Ошибка загрузки на хостинг: {e}")
+    photo_url = await loop.run_in_executor(None, upload_to_imgbb, image_data)
+    if not photo_url:
+        await message.answer("❌ Не удалось загрузить фото на ImgBB.")
         return
-
-    # Кодируем текст и фон
-    top_enc = urllib.parse.quote(top_text if top_text else "_")
-    bottom_enc = urllib.parse.quote(bottom_text if bottom_text else "_")
+    top_enc = urllib.parse.quote(top_text or "_")
+    bottom_enc = urllib.parse.quote(bottom_text or "_")
     bg_enc = urllib.parse.quote(photo_url)
-
     url = f"https://api.memegen.link/images/custom/{top_enc}/{bottom_enc}.png?background={bg_enc}&font=impact"
-
-    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        response = await loop.run_in_executor(None, lambda: requests.get(url, headers=headers, timeout=30))
+        response = await loop.run_in_executor(None, lambda: requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30))
         if response.status_code != 200:
-            await message.reply_text(f"❌ Ошибка генерации мема: {response.status_code}")
+            await message.answer(f"❌ Ошибка генерации мема: {response.status_code}")
             return
-        meme_bytes = response.content
-        await message.reply_photo(photo=meme_bytes, caption="🎭 Твой мем готов!")
+        await message.answer_photo(photo=response.content, caption="🎭 Твой мем готов!")
     except Exception as e:
-        await message.reply_text(f"❌ Ошибка при создании мема: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
 
-# ==================== /search ====================
-async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat_id(update.effective_chat.id)
-    add_activity(update.effective_chat.id, update.effective_user.id)
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    message = update.message
 
+@router.message(Command("search"))
+async def search(message: Message):
+    save_chat_id(message.chat.id)
+    add_activity(message.chat.id, message.from_user.id)
+    chat_id, user_id = message.chat.id, message.from_user.id
     cool, remain = check_cd(chat_id, user_id, 'search')
     if cool:
-        seconds_left = max(0, int(remain.total_seconds()))
-        m, s = divmod(seconds_left, 60)
-        await message.reply_text(f"⏳ Подожди {m} мин {s} сек", quote=True)
+        s = max(0, int(remain.total_seconds()))
+        m, sec = divmod(s, 60)
+        await message.answer(f"⏳ Подожди {m} мин {sec} сек", reply_to_message_id=message.message_id)
         return
-
-    query = " ".join(context.args) if context.args else ""
+    query = " ".join(get_args(message))
     if not query:
-        await message.reply_text("❌ Напиши запрос: /search кот")
+        await message.answer("❌ Напиши запрос: /search кот")
         return
-
-    status_msg = await message.reply_text(f"🔍 Ищу картинки по запросу: {query}...")
+    status_msg = await message.answer(f"🔍 Ищу: {query}...")
     loop = asyncio.get_event_loop()
-
     try:
-        translated_query = await loop.run_in_executor(None, translate_text, query, 'en')
-        logging.info(f"Переведено: '{query}' -> '{translated_query}'")
-        search_query = translated_query if translated_query else query
-    except Exception as e:
-        logging.error(f"Ошибка перевода, использую оригинал: {e}")
+        translated = await loop.run_in_executor(None, translate_text, query, 'en')
+        search_query = translated or query
+    except Exception:
         search_query = query
-
     try:
         urls = await search_unsplash(search_query, per_page=10)
     except Exception as e:
-        await status_msg.edit_text(f"❌ Ошибка поиска: {e}")
+        await status_msg.edit_text(f"❌ Ошибка: {e}")
         return
-
     if not urls:
-        await status_msg.edit_text(f"❌ Ничего не найдено по запросу: {query}")
+        await status_msg.edit_text(f"❌ Ничего не найдено: {query}")
         return
-
-    if update.effective_chat.type == "private":
+    if message.chat.type == "private":
         count = min(3, len(urls))
         selected = random.sample(urls, count)
-        caption = f"🖼️ Нашёл {count} картинок по запросу: {query}"
+        caption = f"🖼️ Нашёл {count} картинок: {query}"
     else:
-        count = 1
         selected = [random.choice(urls)]
-        caption = f"🖼️ Картинка по запросу: {query}"
-
+        caption = f"🖼️ Картинка: {query}"
     await status_msg.delete()
-
     for idx, url in enumerate(selected):
         try:
             response = await loop.run_in_executor(None, lambda: requests.get(url, timeout=15))
             if response.status_code == 200:
-                cap = caption if idx == 0 else ""
-                await message.reply_photo(photo=response.content, caption=cap)
-            else:
-                await message.reply_text(f"❌ Не удалось загрузить картинку: {url[:50]}...")
+                await message.answer_photo(photo=response.content, caption=caption if idx == 0 else "")
         except Exception as e:
-            await message.reply_text(f"❌ Ошибка при загрузке: {e}")
-
+            await message.answer(f"❌ Ошибка: {e}")
     use_cd(chat_id, user_id, 'search')
 
-# ==================== /voice ====================
-async def voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat_id(update.effective_chat.id)
-    add_activity(update.effective_chat.id, update.effective_user.id)
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    message = update.message
 
+@router.message(Command("voice"))
+async def voice(message: Message):
+    save_chat_id(message.chat.id)
+    add_activity(message.chat.id, message.from_user.id)
+    chat_id, user_id = message.chat.id, message.from_user.id
     cool, remain = check_cd(chat_id, user_id, 'voice')
     if cool:
-        seconds_left = max(0, int(remain.total_seconds()))
-        m, s = divmod(seconds_left, 60)
-        await message.reply_text(f"⏳ Подожди {m} мин {s} сек", quote=True)
+        s = max(0, int(remain.total_seconds()))
+        m, sec = divmod(s, 60)
+        await message.answer(f"⏳ Подожди {m} мин {sec} сек", reply_to_message_id=message.message_id)
         return
-
-    text = " ".join(context.args) if context.args else ""
+    text = " ".join(get_args(message))
     if not text:
-        await message.reply_text("❌ Напиши текст: /voice Привет мир")
+        await message.answer("❌ Напиши текст: /voice Привет мир")
         return
-
     try:
         tts = gTTS(text=text, lang='ru')
         audio_bytes = BytesIO()
         tts.write_to_fp(audio_bytes)
         audio_bytes.seek(0)
-        await message.reply_voice(voice=audio_bytes, caption="🔊 Озвучено!")
+        await message.answer_voice(voice=audio_bytes, caption="🔊 Озвучено!")
         use_cd(chat_id, user_id, 'voice')
     except Exception as e:
-        await message.reply_text(f"❌ Ошибка озвучивания: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
 
-# ==================== /cat и /dog ====================
-async def cat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat_id(update.effective_chat.id)
-    add_activity(update.effective_chat.id, update.effective_user.id)
-    url = "https://api.thecatapi.com/v1/images/search"
+
+@router.message(Command("cat"))
+async def cat(message: Message):
+    save_chat_id(message.chat.id)
+    add_activity(message.chat.id, message.from_user.id)
     try:
-        response = await asyncio.to_thread(requests.get, url, timeout=10)
-        data = response.json()
+        r = await asyncio.to_thread(requests.get, "https://api.thecatapi.com/v1/images/search", timeout=10)
+        data = r.json()
         if data and "url" in data[0]:
-            img_response = await asyncio.to_thread(requests.get, data[0]["url"], timeout=10)
-            await update.message.reply_photo(photo=img_response.content, caption="🐱 Мяу!")
+            img = await asyncio.to_thread(requests.get, data[0]["url"], timeout=10)
+            await message.answer_photo(photo=img.content, caption="🐱 Мяу!")
         else:
-            await update.message.reply_text("❌ Не удалось найти котика!")
+            await message.answer("❌ Не удалось найти котика!")
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
 
-async def dog(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat_id(update.effective_chat.id)
-    add_activity(update.effective_chat.id, update.effective_user.id)
-    url = "https://api.thedogapi.com/v1/images/search"
+
+@router.message(Command("dog"))
+async def dog(message: Message):
+    save_chat_id(message.chat.id)
+    add_activity(message.chat.id, message.from_user.id)
     try:
-        response = await asyncio.to_thread(requests.get, url, timeout=10)
-        data = response.json()
+        r = await asyncio.to_thread(requests.get, "https://api.thedogapi.com/v1/images/search", timeout=10)
+        data = r.json()
         if data and "url" in data[0]:
-            img_response = await asyncio.to_thread(requests.get, data[0]["url"], timeout=10)
-            await update.message.reply_photo(photo=img_response.content, caption="🐶 Гав!")
+            img = await asyncio.to_thread(requests.get, data[0]["url"], timeout=10)
+            await message.answer_photo(photo=img.content, caption="🐶 Гав!")
         else:
-            await update.message.reply_text("❌ Не удалось найти собачку!")
+            await message.answer("❌ Не удалось найти собачку!")
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
 
-# ==================== /top ====================
-async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat_id(update.effective_chat.id)
-    add_activity(update.effective_chat.id, update.effective_user.id)
-    chat_id = update.effective_chat.id
-    chat_type = update.effective_chat.type
-    
-    if chat_type not in ["group", "supergroup"]:
-        await update.message.reply_text("📊 Топ доступен только в группах!")
+
+@router.message(Command("top"))
+async def top(message: Message):
+    save_chat_id(message.chat.id)
+    add_activity(message.chat.id, message.from_user.id)
+    chat_id = message.chat.id
+    if message.chat.type not in ["group", "supergroup"]:
+        await message.answer("📊 Топ только для групп!")
         return
-    
     stats = user_stats.get(chat_id, {})
     if not stats:
-        await update.message.reply_text("📊 Пока нет активности в этом чате!")
+        await message.answer("📊 Пока нет активности!")
         return
-    
     sorted_users = sorted(stats.items(), key=lambda x: x[1], reverse=True)[:10]
-    
-    top_text = "🏆 **Топ-10 активных пользователей:**\n\n"
+    text = "🏆 **Топ-10:**\n\n"
     medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-    
-    for idx, (user_id, count) in enumerate(sorted_users):
+    for idx, (uid, count) in enumerate(sorted_users):
         try:
-            user = await context.bot.get_chat_member(chat_id, user_id)
-            name = user.user.first_name
-            if user.user.username:
-                name = f"@{user.user.username}"
-        except:
-            name = f"ID: {user_id}"
-        
-        medal = medals[idx] if idx < len(medals) else f"{idx+1}."
-        top_text += f"{medal} **{name}** — {count} действий\n"
-    
-    await update.message.reply_text(top_text, parse_mode="Markdown")
+            member = await bot.get_chat_member(chat_id, uid)
+            name = f"@{member.user.username}" if member.user.username else member.user.first_name
+        except Exception:
+            name = f"ID: {uid}"
+        text += f"{medals[idx]} **{name}** — {count}\n"
+    await message.answer(text, parse_mode="Markdown")
 
-# ==================== ИГРЫ ====================
-async def game(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat_id(update.effective_chat.id)
-    add_activity(update.effective_chat.id, update.effective_user.id)
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    message = update.message
-    
-    if chat_id in games and games[chat_id]["active"]:
-        await message.reply_text(
-            f"❌ Игра уже идёт! Её запустил пользователь.\n"
-            f"Дождись окончания или попроси его завершить.",
-            parse_mode="Markdown"
+
+@router.message(Command("factme"))
+async def factme(message: Message):
+    save_chat_id(message.chat.id)
+    add_activity(message.chat.id, message.from_user.id)
+    fact = random.choice(FACTS)
+    await message.answer(f"🧠 **Факт о тебе, {message.from_user.first_name}:**\n\n{fact}", parse_mode="Markdown")
+
+
+@router.message(Command("animal"))
+async def animal(message: Message):
+    save_chat_id(message.chat.id)
+    add_activity(message.chat.id, message.from_user.id)
+    a = random.choice(ANIMALS)
+    await message.answer(f"🐾 **Ты — {a['name']}!**\n\n{a['emoji']} {a['description']}", parse_mode="Markdown")
+
+
+@router.message(Command("spin"))
+async def spin(message: Message):
+    if message.chat.type not in ("group", "supergroup"):
+        await message.answer("🎲 Только в группах!")
+        return
+    known = list(user_stats.get(message.chat.id, {}).keys())[:200]
+    candidates = []
+    for uid in known:
+        try:
+            m = await bot.get_chat_member(message.chat.id, int(uid))
+            if m.user and not m.user.is_bot and m.status not in ("left", "kicked"):
+                candidates.append(m.user)
+        except Exception:
+            pass
+    if not candidates:
+        await message.answer("Пока не знаю активных. Пусть участники напишут что-нибудь.")
+        return
+    target = random.choice(candidates)
+    q = random.choice(SPIN_QUESTIONS)
+    name = f"@{target.username}" if target.username else (target.first_name or "Участник")
+    await message.answer(f"🎲 Чат-рулетка!\n\n👤 Выпал: {name}\n❓ {q}")
+
+
+@router.message(Command("offer"))
+async def offer(message: Message):
+    if message.chat.type != "private":
+        await message.answer("❌ Только в ЛС!")
+        return
+    text = " ".join(get_args(message))
+    if not text:
+        await message.answer(
+            f"📋 **Правила:**\n\n{OFFER_RULES_URL}\n\nНапиши `/offer Твоя идея`",
+            parse_mode="Markdown", disable_web_page_preview=True
         )
         return
-    
-    kb = [
-        [InlineKeyboardButton("🎯 Угадай число", callback_data=f"game_start:guess:{user_id}")],
-        [InlineKeyboardButton("✂️ Камень-ножницы-бумага", callback_data=f"game_start:rps:{user_id}")],
-        [InlineKeyboardButton("🧠 Викторина", callback_data=f"game_start:quiz:{user_id}")],
-        [InlineKeyboardButton("🛑 Завершить игру", callback_data=f"game_stop:{user_id}")],
-    ]
-    await message.reply_text(
-        "🎮 **Выбери игру:**\n\n"
-        "• Угадай число — я загадаю, ты угадываешь\n"
-        "• Камень-ножницы-бумага — игра с ботом\n"
-        "• Викторина — ответь на вопрос\n\n"
-        "📝 Для ответа используй: `/answer`",
-        reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode="Markdown"
-    )
+    user = message.from_user
+    uname = f"@{user.username}" if user.username else user.first_name
+    safe = escape_markdown(text)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Принять", callback_data=f"offer_accept_{user.id}"),
+        InlineKeyboardButton(text="❌ Отклонить", callback_data=f"offer_reject_{user.id}"),
+    ]])
+    try:
+        await bot.send_message(ADMIN_ID, f"📩 **Новая идея от {uname}** (ID: `{user.id}`)\n\n{safe}",
+                               reply_markup=kb, parse_mode="Markdown")
+        await message.answer("✅ Идея отправлена! 🙌")
+    except Exception as e:
+        log.error(f"Ошибка offer: {e}")
+        await message.answer("❌ Ошибка отправки.")
 
-async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    chat_id = query.message.chat_id
-    user_id = query.from_user.id
-    data_parts = query.data.split(":")
-    action = data_parts[0]
-    game_type = data_parts[1] if len(data_parts) > 1 else None
-    initiator_id = int(data_parts[2]) if len(data_parts) > 2 else None
-    
-    if action == "game_stop":
-        if chat_id in games and games[chat_id]["active"]:
-            if games[chat_id]["user_id"] != user_id:
-                await query.edit_message_text("❌ Только создатель игры может её завершить!")
-                return
+
+@router.message(Command("donate"))
+async def donate(message: Message):
+    if message.chat.type != "private":
+        await message.answer("❌ Только в ЛС!")
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⭐ 10", callback_data="donate_10"),
+         InlineKeyboardButton(text="⭐ 50", callback_data="donate_50")],
+        [InlineKeyboardButton(text="⭐ 100", callback_data="donate_100"),
+         InlineKeyboardButton(text="⭐ 200", callback_data="donate_200")],
+        [InlineKeyboardButton(text="⭐ 500", callback_data="donate_500")],
+        [InlineKeyboardButton(text="✏️ Своя сумма", callback_data="donate_custom")],
+    ])
+    await message.answer("🌟 **Поддержи бота звёздами!**", reply_markup=kb, parse_mode="Markdown")
+
+
+@router.message(Command("chats"))
+async def chats(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ Нет прав!")
+        return
+    try:
+        with open(CHATS_DB_FILE, "r", encoding="utf-8") as f:
+            ids = json.load(f)
+    except Exception:
+        await message.answer("📭 Нет чатов.")
+        return
+    if not ids:
+        await message.answer("📭 Пусто.")
+        return
+    result = f"📊 **Чатов:** {len(ids)}\n\n"
+    for cid in ids[:20]:
+        result += f"`{cid}`\n"
+    if len(ids) > 20:
+        result += f"\n... и ещё {len(ids) - 20}"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📨 Разослать всем", callback_data="broadcast_all")
+    ]])
+    await message.answer(result, reply_markup=kb, parse_mode="Markdown")
+
+
+@router.message(Command("go"))
+async def go(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ Нет прав!")
+        return
+    text = " ".join(get_args(message))
+    if not text:
+        await message.answer("❌ `/go Текст`", parse_mode="Markdown")
+        return
+    try:
+        with open(CHATS_DB_FILE, "r", encoding="utf-8") as f:
+            ids = json.load(f)
+    except Exception:
+        await message.answer("❌ Нет чатов!")
+        return
+    status = await message.answer(f"🚀 Рассылка в {len(ids)}...")
+    sent = failed = 0
+    for cid in ids:
+        try:
+            await bot.send_message(cid, text, parse_mode="Markdown")
+            sent += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(0.3)
+    await status.edit_text(f"✅ Готово!\n📤 {sent}\n❌ {failed}\n📊 {len(ids)}")
+
+
+@router.message(Command("donate_broadcast"))
+async def donate_broadcast(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ Нет прав!")
+        return
+    text = " ".join(get_args(message))
+    if not text:
+        await message.answer("❌ `/donate_broadcast Текст`", parse_mode="Markdown")
+        return
+    d = load_donations()
+    if not d:
+        await message.answer("📭 Нет донатеров!")
+        return
+    uids = [int(u) for u in d.keys()]
+    status = await message.answer(f"🚀 Рассылка {len(uids)} донатерам...")
+    sent = failed = 0
+    for uid in uids:
+        try:
+            await bot.send_message(uid, text, parse_mode="Markdown")
+            sent += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(0.3)
+    await status.edit_text(f"✅ Готово!\n📤 {sent}\n❌ {failed}\n📊 {len(uids)}")
+
+
+@router.message(Command("donates"))
+async def donates(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ Нет прав!")
+        return
+    d = load_donations()
+    if not d:
+        await message.answer("📭 Нет донатов!")
+        return
+    sorted_d = sorted(d.items(), key=lambda x: x[1]["total"], reverse=True)
+    total = sum(v["total"] for v in d.values())
+    result = f"🌟 **Статистика:**\n\n📊 Всего: **{total}**\n👤 Донатеров: **{len(d)}**\n\n🏆 **Топ:**\n"
+    for i, (uid, data) in enumerate(sorted_d[:10], 1):
+        try:
+            info = await bot.get_chat(int(uid))
+            name = f"@{info.username}" if info.username else info.first_name
+        except Exception:
+            name = f"ID: {uid}"
+        result += f"{i}. **{name}** — {data['total']} ({data['count']})\n"
+    await message.answer(result, parse_mode="Markdown")
+
+
+@router.message(Command("cancel"))
+async def cancel_broadcast(message: Message):
+    uid = message.from_user.id
+    if uid in pending_broadcast_all:
+        del pending_broadcast_all[uid]
+        await message.answer("❌ Отменено.")
+    else:
+        await message.answer("Нет активной рассылки.")
+
+
+# ============================================================
+# ИГРЫ
+# ============================================================
+
+@router.message(Command("game"))
+async def game(message: Message):
+    save_chat_id(message.chat.id)
+    add_activity(message.chat.id, message.from_user.id)
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if chat_id in games and games[chat_id]["active"]:
+        await message.answer("❌ Игра уже идёт!")
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎯 Угадай число", callback_data=f"game_start:guess:{user_id}")],
+        [InlineKeyboardButton(text="✂️ КНБ", callback_data=f"game_start:rps:{user_id}")],
+        [InlineKeyboardButton(text="🧠 Викторина", callback_data=f"game_start:quiz:{user_id}")],
+        [InlineKeyboardButton(text="🛑 Завершить", callback_data=f"game_stop:{user_id}")],
+    ])
+    await message.answer("🎮 **Выбери игру:**\n\n📝 `/answer`", reply_markup=kb, parse_mode="Markdown")
+
+
+@router.message(Command("answer"))
+async def answer(message: Message):
+    save_chat_id(message.chat.id)
+    add_activity(message.chat.id, message.from_user.id)
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if chat_id not in games or not games[chat_id]["active"]:
+        await message.answer("❌ Нет активной игры!")
+        return
+    gd = games[chat_id]
+    if gd["user_id"] != user_id:
+        await message.answer("❌ Только создатель игры!")
+        return
+    text = " ".join(get_args(message))
+    if not text:
+        await message.answer("❌ Напиши ответ после команды!")
+        return
+    if gd["type"] == "guess":
+        try:
+            guess = int(text.strip())
+        except ValueError:
+            await message.answer("❌ Напиши число!")
+            return
+        if guess < 1 or guess > 100:
+            await message.answer("❌ От 1 до 100!")
+            return
+        gd["data"]["tries"] += 1
+        gd["data"]["users"].add(user_id)
+        num = gd["data"]["number"]
+        if guess == num:
+            await message.answer(f"🎉 **Угадал!** Число **{num}**!\nПопыток: {gd['data']['tries']}\n\n`/game`", parse_mode="Markdown")
             games[chat_id]["active"] = False
             if chat_id in game_timers:
                 game_timers[chat_id].cancel()
                 del game_timers[chat_id]
-            await query.edit_message_text("🛑 Игра завершена!")
+            return
+        hint = "📈 Больше!" if guess < num else "📉 Меньше!"
+        await message.answer(f"❌ **{hint}**\nПопыток: {gd['data']['tries']}", parse_mode="Markdown")
+    elif gd["type"] == "quiz":
+        if gd["data"].get("answered"):
+            await message.answer("❌ Уже отвечал!")
+            return
+        ua = text.strip().lower()
+        correct = gd["data"]["answer"]
+        if ua == correct:
+            await message.answer(f"🎉 **Правильно!**\nОтвет: {correct}\n\n`/game`", parse_mode="Markdown")
         else:
-            await query.edit_message_text("❌ Активной игры нет!")
-        return
-    
-    if action == "game_start":
-        if chat_id in games and games[chat_id]["active"]:
-            await query.edit_message_text("❌ Игра уже идёт в этом чате!")
-            return
-        
-        if initiator_id != user_id:
-            await query.edit_message_text("❌ Только создатель игры может её запустить!")
-            return
-        
-        games[chat_id] = {
-            "user_id": user_id,
-            "type": game_type,
-            "active": True,
-            "data": {}
-        }
-        
+            gd["data"]["answered"] = True
+            await message.answer(f"❌ **Неверно!**\nПравильно: {correct}\n\n`/game`", parse_mode="Markdown")
+        games[chat_id]["active"] = False
         if chat_id in game_timers:
             game_timers[chat_id].cancel()
             del game_timers[chat_id]
-        task = asyncio.create_task(auto_end_game(chat_id, context))
-        game_timers[chat_id] = task
-        
-        if game_type == "guess":
-            number = random.randint(1, 100)
-            games[chat_id]["data"]["number"] = number
-            games[chat_id]["data"]["tries"] = 0
-            games[chat_id]["data"]["users"] = set()
-            kb = [[InlineKeyboardButton("🛑 Завершить игру", callback_data=f"game_stop:{user_id}")]]
-            await query.edit_message_text(
-                f"🎯 **Игра началась!** (Создатель: @{query.from_user.username or query.from_user.first_name})\n\n"
-                f"Я загадал число от 1 до 100.\n"
-                f"Напиши: `/answer 50` (подставь своё число)\n"
-                f"Чтобы завершить игру — нажми кнопку ниже.",
-                reply_markup=InlineKeyboardMarkup(kb),
-                parse_mode="Markdown"
-            )
-        
-        elif game_type == "rps":
-            games[chat_id]["data"]["winner"] = None
-            kb = [
-                [InlineKeyboardButton("🪨 Камень", callback_data=f"game_rps:камень:{user_id}")],
-                [InlineKeyboardButton("✂️ Ножницы", callback_data=f"game_rps:ножницы:{user_id}")],
-                [InlineKeyboardButton("📄 Бумага", callback_data=f"game_rps:бумага:{user_id}")],
-                [InlineKeyboardButton("🛑 Завершить игру", callback_data=f"game_stop:{user_id}")],
-            ]
-            await query.edit_message_text(
-                f"✂️ **Камень-ножницы-бумага!** (Создатель: @{query.from_user.username or query.from_user.first_name})\n\n"
-                f"Выбери свой ход:",
-                reply_markup=InlineKeyboardMarkup(kb),
-                parse_mode="Markdown"
-            )
-        
-        elif game_type == "quiz":
-            questions = [
-                {"question": "Сколько планет в Солнечной системе?", "answer": "8"},
-                {"question": "Какой язык программирования самый популярный?", "answer": "python"},
-                {"question": "Столица Франции?", "answer": "париж"},
-                {"question": "Сколько дней в феврале в високосный год?", "answer": "29"},
-                {"question": "Как называется самый большой океан?", "answer": "тихий"},
-                {"question": "Сколько цветов в радуге?", "answer": "7"},
-                {"question": "Какой год считается началом Второй мировой войны?", "answer": "1939"},
-            ]
-            q = random.choice(questions)
-            games[chat_id]["data"]["question"] = q["question"]
-            games[chat_id]["data"]["answer"] = q["answer"].lower()
-            games[chat_id]["data"]["answered"] = False
-            kb = [[InlineKeyboardButton("🛑 Завершить игру", callback_data=f"game_stop:{user_id}")]]
-            await query.edit_message_text(
-                f"🧠 **Викторина!** (Создатель: @{query.from_user.username or query.from_user.first_name})\n\n"
-                f"❓ {q['question']}\n\n"
-                f"Напиши: `/answer {q['answer']}` (подставь свой ответ)\n"
-                f"Чтобы завершить игру — нажми кнопку ниже.",
-                reply_markup=InlineKeyboardMarkup(kb),
-                parse_mode="Markdown"
-            )
 
-async def game_rps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
+
+async def auto_end_game(chat_id):
+    await asyncio.sleep(60)
+    if chat_id in games and games[chat_id]["active"]:
+        games[chat_id]["active"] = False
+        try:
+            await bot.send_message(chat_id, "⏰ **Игра завершена по таймауту!**\n`/game`", parse_mode="Markdown")
+        except Exception:
+            pass
+        game_timers.pop(chat_id, None)
+
+
+# ============================================================
+# КОЛБЭКИ
+# ============================================================
+
+@router.callback_query(F.data.startswith("game_start:"))
+async def game_start_cb(query: CallbackQuery):
     await query.answer()
-    
-    chat_id = query.message.chat_id
+    chat_id = query.message.chat.id
     user_id = query.from_user.id
-    data_parts = query.data.split(":")
-    choice = data_parts[1]
-    initiator_id = int(data_parts[2]) if len(data_parts) > 2 else None
-    
+    parts = query.data.split(":")
+    game_type = parts[1]
+    initiator = int(parts[2])
+    if chat_id in games and games[chat_id]["active"]:
+        await query.message.edit_text("❌ Игра уже идёт!")
+        return
+    if initiator != user_id:
+        await query.message.edit_text("❌ Только создатель!")
+        return
+    games[chat_id] = {"user_id": user_id, "type": game_type, "active": True, "data": {}}
+    if chat_id in game_timers:
+        game_timers[chat_id].cancel()
+    game_timers[chat_id] = asyncio.create_task(auto_end_game(chat_id))
+    uname = query.from_user.username or query.from_user.first_name
+    if game_type == "guess":
+        games[chat_id]["data"] = {"number": random.randint(1, 100), "tries": 0, "users": set()}
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛑 Завершить", callback_data=f"game_stop:{user_id}")]])
+        await query.message.edit_text(
+            f"🎯 **Началась!** (Создатель: @{uname})\n\nЯ загадал число 1–100.\n`/answer 50`",
+            reply_markup=kb, parse_mode="Markdown"
+        )
+    elif game_type == "rps":
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🪨 Камень", callback_data=f"game_rps:камень:{user_id}")],
+            [InlineKeyboardButton(text="✂️ Ножницы", callback_data=f"game_rps:ножницы:{user_id}")],
+            [InlineKeyboardButton(text="📄 Бумага", callback_data=f"game_rps:бумага:{user_id}")],
+            [InlineKeyboardButton(text="🛑 Завершить", callback_data=f"game_stop:{user_id}")],
+        ])
+        await query.message.edit_text(f"✂️ **КНБ!** (Создатель: @{uname})\n\nВыбери ход:", reply_markup=kb, parse_mode="Markdown")
+    elif game_type == "quiz":
+        qs = [
+            {"q": "Сколько планет в Солнечной системе?", "a": "8"},
+            {"q": "Столица Франции?", "a": "париж"},
+            {"q": "Сколько дней в феврале в високосный год?", "a": "29"},
+            {"q": "Сколько цветов в радуге?", "a": "7"},
+        ]
+        q = random.choice(qs)
+        games[chat_id]["data"] = {"question": q["q"], "answer": q["a"].lower(), "answered": False}
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛑 Завершить", callback_data=f"game_stop:{user_id}")]])
+        await query.message.edit_text(
+            f"🧠 **Викторина!** (Создатель: @{uname})\n\n❓ {q['q']}\n\n`/answer ...`",
+            reply_markup=kb, parse_mode="Markdown"
+        )
+
+
+@router.callback_query(F.data.startswith("game_stop:"))
+async def game_stop_cb(query: CallbackQuery):
+    await query.answer()
+    chat_id = query.message.chat.id
+    user_id = query.from_user.id
     if chat_id not in games or not games[chat_id]["active"]:
-        await query.edit_message_text("❌ Игра уже завершена!")
+        await query.message.edit_text("❌ Нет игры!")
         return
-    
     if games[chat_id]["user_id"] != user_id:
-        await query.edit_message_text("❌ Только создатель игры может играть!")
+        await query.answer("Только создатель!", show_alert=True)
         return
-    
-    if games[chat_id]["type"] != "rps":
-        await query.edit_message_text("❌ Это не камень-ножницы-бумага!")
+    games[chat_id]["active"] = False
+    if chat_id in game_timers:
+        game_timers[chat_id].cancel()
+        del game_timers[chat_id]
+    await query.message.edit_text("🛑 Игра завершена!")
+
+
+@router.callback_query(F.data.startswith("game_rps:"))
+async def game_rps_cb(query: CallbackQuery):
+    await query.answer()
+    chat_id = query.message.chat.id
+    user_id = query.from_user.id
+    parts = query.data.split(":")
+    choice = parts[1]
+    if chat_id not in games or not games[chat_id]["active"] or games[chat_id]["type"] != "rps":
+        await query.message.edit_text("❌ Игра неактивна!")
         return
-    
+    if games[chat_id]["user_id"] != user_id:
+        await query.answer("Только создатель!", show_alert=True)
+        return
     bot_choice = random.choice(["камень", "ножницы", "бумага"])
-    
     if choice == bot_choice:
         result = "🤝 Ничья!"
     elif (choice == "камень" and bot_choice == "ножницы") or \
@@ -2176,1246 +1660,740 @@ async def game_rps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = "🎉 Ты выиграл!"
     else:
         result = "😅 Бот выиграл!"
-    
-    emojis = {"камень": "🪨", "ножницы": "✂️", "бумага": "📄"}
-    
-    kb = [[InlineKeyboardButton("🔄 Сыграть ещё раз", callback_data=f"game_start:rps:{user_id}")],
-          [InlineKeyboardButton("🛑 Завершить игру", callback_data=f"game_stop:{user_id}")]]
-    
-    await query.edit_message_text(
-        f"✂️ **Камень-ножницы-бумага!**\n\n"
-        f"Ты: {emojis[choice]} {choice}\n"
-        f"Бот: {emojis[bot_choice]} {bot_choice}\n\n"
-        f"**{result}**",
-        reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode="Markdown"
+    em = {"камень": "🪨", "ножницы": "✂️", "бумага": "📄"}
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Ещё раз", callback_data=f"game_start:rps:{user_id}")],
+        [InlineKeyboardButton(text="🛑 Завершить", callback_data=f"game_stop:{user_id}")],
+    ])
+    await query.message.edit_text(
+        f"✂️ Ты: {em[choice]} {choice}\n🤖 Бот: {em[bot_choice]} {bot_choice}\n\n**{result}**",
+        reply_markup=kb, parse_mode="Markdown"
     )
 
-# ==================== /answer ====================
-async def answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat_id(update.effective_chat.id)
-    add_activity(update.effective_chat.id, update.effective_user.id)
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    message = update.message
-    
-    if chat_id not in games or not games[chat_id]["active"]:
-        await message.reply_text("❌ Нет активной игры!")
-        return
-    
-    game_data = games[chat_id]
-    
-    if game_data["user_id"] != user_id:
-        await message.reply_text("❌ Только создатель игры может отвечать!")
-        return
-    
-    answer_text = " ".join(context.args) if context.args else ""
-    if not answer_text:
-        await message.reply_text(
-            "❌ Напиши ответ после команды!\n"
-            "Примеры:\n"
-            "`/answer 50` — для угадайки\n"
-            "`/answer Париж` — для викторины",
-            parse_mode="Markdown"
-        )
-        return
-    
-    if game_data["type"] == "guess":
-        await handle_guess_answer(update, context, game_data, answer_text)
-    elif game_data["type"] == "quiz":
-        await handle_quiz_answer(update, context, game_data, answer_text)
-    else:
-        await message.reply_text("❌ Неизвестный тип игры!")
 
-async def handle_guess_answer(update: Update, context: ContextTypes.DEFAULT_TYPE, game_data, answer_text):
-    message = update.message
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    
+@router.callback_query(F.data.startswith("cd:"))
+async def cd_button(query: CallbackQuery):
+    cmd = query.data.split(":")[1]
+    pending_cooldown_input[(query.message.chat.id, query.from_user.id)] = cmd
+    await query.answer()
+    await query.message.edit_text(f"Введи кулдаун для /{cmd} (0-3600):")
+
+
+@router.callback_query(F.data == "broadcast_all")
+async def broadcast_all_callback(query: CallbackQuery):
+    await query.answer()
+    if query.from_user.id != ADMIN_ID:
+        await query.message.edit_text("❌ Нет прав!")
+        return
+    pending_broadcast_all[query.from_user.id] = True
+    await query.message.edit_text("✏️ Введи текст рассылки.\n/cancel — отмена.")
+
+
+@router.callback_query(F.data.startswith("offer_"))
+async def offer_callback(query: CallbackQuery):
+    if query.from_user.id != ADMIN_ID:
+        await query.answer("❌ Только админ!", show_alert=True)
+        return
+    await query.answer()
+    parts = query.data.split("_")
+    action = parts[1]
+    target = int(parts[2])
+    if action == "accept":
+        txt = "🌟 **Спасибо за идею!** Возможно, увидишь её в следующем обновлении!"
+    else:
+        txt = "❌ **Твоя идея отклонена.**"
     try:
-        guess = int(answer_text.strip())
-    except:
-        await message.reply_text("❌ Напиши число! Например: `/answer 50`", parse_mode="Markdown")
-        return
-    
-    if guess < 1 or guess > 100:
-        await message.reply_text("❌ Число должно быть от 1 до 100!")
-        return
-    
-    game_data["data"]["tries"] += 1
-    game_data["data"]["users"].add(user_id)
-    number = game_data["data"]["number"]
-    
-    if guess == number:
-        await message.reply_text(
-            f"🎉 **Поздравляю!**\n"
-            f"Ты угадал число **{number}**!\n"
-            f"Попыток: {game_data['data']['tries']}\n\n"
-            f"🔄 Сыграть ещё раз: `/game`",
+        await bot.send_message(target, txt, parse_mode="Markdown")
+    except Exception as e:
+        log.error(f"offer reply: {e}")
+    await query.message.edit_text(query.message.text + f"\n\n✅ {action}", reply_markup=None)
+
+
+@router.callback_query(F.data.startswith("donate_"))
+async def donate_callback(query: CallbackQuery):
+    await query.answer()
+    user_id = query.from_user.id
+    data = query.data
+    if data == "donate_custom":
+        temp_donation_amounts[user_id] = 0
+        await query.message.edit_text(
+            f"✏️ Сумма: **0**\n\n",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="➕ +5", callback_data="donate_adj_+5"),
+                 InlineKeyboardButton(text="➕ +10", callback_data="donate_adj_+10")],
+                [InlineKeyboardButton(text="➖ -5", callback_data="donate_adj_-5"),
+                 InlineKeyboardButton(text="➖ -10", callback_data="donate_adj_-10")],
+                [InlineKeyboardButton(text="✅ Отправить", callback_data="donate_send"),
+                 InlineKeyboardButton(text="❌ Отмена", callback_data="donate_cancel")],
+            ]),
             parse_mode="Markdown"
         )
-        games[chat_id]["active"] = False
-        if chat_id in game_timers:
-            game_timers[chat_id].cancel()
-            del game_timers[chat_id]
         return
-    
-    hint = "📈 Больше!" if guess < number else "📉 Меньше!"
-    await message.reply_text(
-        f"❌ Не угадал! **{hint}**\n"
-        f"Попыток: {game_data['data']['tries']}",
-        parse_mode="Markdown"
-    )
-
-async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE, game_data, answer_text):
-    message = update.message
-    chat_id = update.effective_chat.id
-    
-    if game_data["data"].get("answered", False):
-        await message.reply_text("❌ Ты уже отвечал на этот вопрос! Начни новую игру.")
-        return
-    
-    user_answer = answer_text.strip().lower()
-    correct_answer = game_data["data"]["answer"]
-    
-    if user_answer == correct_answer:
-        await message.reply_text(
-            f"🎉 **Правильно!**\n"
-            f"Ответ: {correct_answer}\n\n"
-            f"🔄 Сыграть ещё раз: `/game`",
-            parse_mode="Markdown"
-        )
-        games[chat_id]["active"] = False
-        if chat_id in game_timers:
-            game_timers[chat_id].cancel()
-            del game_timers[chat_id]
-    else:
-        game_data["data"]["answered"] = True
-        await message.reply_text(
-            f"❌ **Неправильно!**\n"
-            f"Правильный ответ: {correct_answer}\n\n"
-            f"🔄 Сыграть ещё раз: `/game`",
-            parse_mode="Markdown"
-        )
-        games[chat_id]["active"] = False
-        if chat_id in game_timers:
-            game_timers[chat_id].cancel()
-            del game_timers[chat_id]
-
-async def card(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    message = update.message
-
-    # Проверка кулдауна (10 минут)
-    now = datetime.now()
-    if user_id in card_cooldowns:
-        time_left = card_cooldowns[user_id] + timedelta(minutes=10) - now
-        if time_left > timedelta(0):
-            m, s = divmod(time_left.seconds, 60)
-            await message.reply_text(f"⏳ Подожди {m} мин {s} сек перед следующим открытием!")
+    if data.startswith("donate_adj_"):
+        if user_id not in temp_donation_amounts:
+            await query.message.edit_text("❌ Начни заново с /donate")
             return
-
-    # Кнопки выбора: обычная или платная
-    kb = [
-        [
-            InlineKeyboardButton("🎴 Обычная (бесплатно)", callback_data="card_free"),
-            InlineKeyboardButton("💎 Платная (50 монет)", callback_data="card_premium"),
-        ]
-    ]
-    await message.reply_text(
-        "🎴 **Открыть карточку!**\n\n"
-        "Выбери тип прокрутки:\n"
-        "• Обычная — бесплатно, но шансы ниже\n"
-        "• Платная — 50 монет, шансы выше\n\n"
-        f"💰 Твой баланс: {get_user_balance(user_id)} монет",
-        reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode="Markdown"
-    )
-
-async def card_callback(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    query = update.callback_query
-
-    if not query:
-        logging.error("CARD CALLBACK: callback_query отсутствует")
+        delta = int(data.split("_")[-1])
+        new_amount = max(0, temp_donation_amounts[user_id] + delta)
+        temp_donation_amounts[user_id] = new_amount
+        await query.message.edit_text(
+            f"✏️ Сумма: **{new_amount}**",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="➕ +5", callback_data="donate_adj_+5"),
+                 InlineKeyboardButton(text="➕ +10", callback_data="donate_adj_+10")],
+                [InlineKeyboardButton(text="➖ -5", callback_data="donate_adj_-5"),
+                 InlineKeyboardButton(text="➖ -10", callback_data="donate_adj_-10")],
+                [InlineKeyboardButton(text="✅ Отправить", callback_data="donate_send"),
+                 InlineKeyboardButton(text="❌ Отмена", callback_data="donate_cancel")],
+            ]),
+            parse_mode="Markdown"
+        )
         return
-
-    logging.warning(
-        "CARD CALLBACK HIT: data=%r user_id=%s",
-        query.data,
-        query.from_user.id,
-    )
-
+    if data == "donate_cancel":
+        temp_donation_amounts.pop(user_id, None)
+        await query.message.edit_text("❌ Отменено.")
+        return
+    if data == "donate_send":
+        if user_id not in temp_donation_amounts:
+            await query.message.edit_text("❌ Начни заново с /donate")
+            return
+        amount = temp_donation_amounts.pop(user_id)
+        if amount <= 0:
+            await query.message.edit_text("❌ Сумма > 0!")
+            return
+        await create_invoice(query, user_id, amount)
+        return
     try:
-        await query.answer()
-        logging.warning(
-            "CARD CALLBACK ANSWERED: data=%r",
-            query.data,
-        )
+        amount = int(data.split("_")[1])
     except Exception:
-        logging.exception(
-            "CARD CALLBACK: ошибка при подтверждении нажатия"
-        )
+        await query.message.edit_text("❌ Ошибка!")
+        return
+    await create_invoice(query, user_id, amount)
 
+
+async def create_invoice(query: CallbackQuery, user_id: int, amount: int):
+    try:
+        link = await bot.create_invoice_link(
+            title="Донат в Folk Valley",
+            description=f"Пожертвование {amount} звёзд",
+            payload=f"donation_{user_id}_{amount}_{int(time.time())}",
+            provider_token="",
+            currency="XTR",
+            prices=[{"label": f"{amount} звёзд", "amount": amount}],
+        )
+        await query.message.edit_text(
+            f"🌟 **Оплата!**\nСумма: **{amount}**\n\n[Оплатить {amount} звёзд]({link})",
+            parse_mode="Markdown", disable_web_page_preview=True
+        )
+    except Exception as e:
+        await query.message.edit_text(f"❌ Ошибка: {e}")
+
+
+@router.callback_query(F.data.in_({"card_free", "card_premium"}))
+async def card_callback(query: CallbackQuery):
+    log.warning("CARD HIT: data=%r user=%s", query.data, query.from_user.id)
+    await query.answer()
     user_id = query.from_user.id
     is_premium = query.data == "card_premium"
     now = datetime.now()
-
-    # Проверка кулдауна.
     if user_id in card_cooldowns:
-        time_left = (
-            card_cooldowns[user_id]
-            + timedelta(minutes=10)
-            - now
-        )
-
-        if time_left > timedelta(0):
-            total_seconds = int(time_left.total_seconds())
-            minutes, seconds = divmod(total_seconds, 60)
-
-            await query.edit_message_text(
-                f"⏳ Подожди {minutes} мин {seconds} сек "
-                "перед следующим открытием!"
-            )
+        tl = card_cooldowns[user_id] + timedelta(minutes=10) - now
+        if tl > timedelta(0):
+            m, s = divmod(int(tl.total_seconds()), 60)
+            await query.message.edit_text(f"⏳ Подожди {m} мин {s} сек!")
             return
-
-    # Проверяем баланс, не списывая деньги заранее.
     if is_premium and get_user_balance(user_id) < 50:
-        await query.edit_message_text(
-            "❌ Недостаточно монет! "
-            "Нужно 50 монет для платной прокрутки."
-        )
+        await query.message.edit_text("❌ Нужно 50 монет!")
         return
-
-    # Выбираем карточку до списания денег.
     rarity = roll_rarity(is_premium)
     card_id, card_data = get_card_by_rarity(rarity)
-
     if not card_data:
-        await query.edit_message_text(
-            "❌ Карточка такой редкости пока не найдена. "
-            "Монеты не списаны."
-        )
+        await query.message.edit_text("❌ Карточка не найдена. Монеты не списаны.")
         return
-
-    # Списываем оплату только после выбора существующей карточки.
     if is_premium:
         update_user_balance(user_id, -50)
-
-    # Выдаём карточку ровно один раз.
-    new_card = add_card_to_user(
-        user_id,
-        card_id,
-        card_data
-    )
-
+    new_card = add_card_to_user(user_id, card_id, card_data)
     card_cooldowns[user_id] = now
-
-    rarity_emojis = {
-        "обычная": "⬜",
-        "редкая": "🟦",
-        "эпическая": "🟪",
-        "мифическая": "🌟",
-        "легендарная": "👑",
-        "секретная": "🔮",
-    }
-
-    card_name = card_data.get("name", "Неизвестная карточка")
-    rarity_emoji = rarity_emojis.get(rarity, "🃏")
-    balance = get_user_balance(user_id)
-
+    emojis = {"обычная": "⬜", "редкая": "🟦", "эпическая": "🟪",
+              "мифическая": "🌟", "легендарная": "👑", "секретная": "🔮"}
     caption = (
-        f"{rarity_emoji} **{card_name}**\n"
+        f"{emojis.get(rarity, '🃏')} **{card_data['name']}**\n"
         f"📊 Редкость: {rarity}\n"
-        f"💰 Баланс: {balance} монет\n\n"
-        "🔄 Следующую карточку можно открыть "
-        "через 10 минут."
+        f"💰 Баланс: {get_user_balance(user_id)}\n\n"
+        "🔄 Следующая через 10 минут."
     )
-
     file_id = card_data.get("file_id")
-    chat_id = query.message.chat_id if query.message else None
-
-    # Пытаемся отправить настоящее фото из Telegram.
-    if file_id and file_id != "1111111111" and chat_id:
+    chat_id = query.message.chat.id
+    if file_id and file_id != "1111111111":
         try:
-            await context.bot.send_photo(
-                chat_id=chat_id,
-                photo=file_id,
-                caption=caption,
-                parse_mode="Markdown",
-            )
-
-            # Удаляем старое сообщение с кнопками.
+            await bot.send_photo(chat_id=chat_id, photo=file_id, caption=caption, parse_mode="Markdown")
             try:
-                await query.delete_message()
-            except Exception as delete_error:
-                logging.warning(
-                    "Фото отправлено, но сообщение с кнопками "
-                    "удалить не удалось: %s",
-                    delete_error,
-                )
-
-                try:
-                    await query.edit_message_reply_markup(
-                        reply_markup=None
-                    )
-                except Exception:
-                    pass
-
-        except Exception:
-            logging.exception(
-                "Не удалось отправить фото карточки %s",
-                card_id,
-            )
-
-            # Карточка уже выдана и сохранена.
-            # При ошибке фото всё равно показываем результат.
-            try:
-                await query.edit_message_text(
-                    caption
-                    + "\n\n⚠️ Фото не отправилось, "
-                      "но карточка сохранена.",
-                    parse_mode="Markdown",
-                )
+                await query.message.delete()
             except Exception:
-                await context.bot.send_message(
-                    chat_id=chat_id or user_id,
-                    text=caption
-                    + "\n\n⚠️ Фото не отправилось, "
-                      "но карточка сохранена.",
-                    parse_mode="Markdown",
-                )
-
+                pass
+        except Exception as e:
+            log.exception(f"Фото карточки: {e}")
+            await query.message.edit_text(caption + "\n\n⚠️ Фото не отправилось, но карточка сохранена.", parse_mode="Markdown")
     else:
-        # Для карточек-заглушек показываем текст.
-        await query.edit_message_text(
-            caption
-            + "\n\n🖼️ Изображение для этой карточки "
-              "пока не добавлено.",
-            parse_mode="Markdown",
-        )
-
-    # Уведомление администратору о секретной карточке.
+        await query.message.edit_text(caption + "\n\n🖼️ Нет изображения.", parse_mode="Markdown")
     if rarity == "секретная":
         try:
             user = query.from_user
-            username = (
-                f"@{user.username}"
-                if user.username
-                else user.first_name
-            )
-
-            await context.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=(
-                    "🔮 **СЕКРЕТНАЯ КАРТОЧКА!**\n\n"
-                    f"👤 Пользователь: {username} "
-                    f"(ID: `{user.id}`)\n"
-                    f"🃏 Карточка: **{card_name}**\n"
-                    f"💰 Баланс: {get_user_balance(user_id)} монет"
-                ),
-                parse_mode="Markdown",
-            )
-
-        except Exception:
-            logging.exception(
-                "Не удалось отправить уведомление "
-                "о секретной карточке."
-            )
-
-async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_data = get_user_card_data(user_id)
-    balance = user_data.get("balance", 0)
-    total_cards = user_data.get("total_cards", 0)
-    cards = user_data.get("cards", [])
-    
-    # Считаем по редкостям
-    rarity_counts = {}
-    for card in cards:
-        rarity = card.get("rarity", "неизвестно")
-        rarity_counts[rarity] = rarity_counts.get(rarity, 0) + 1
-    
-    rarity_emojis = {
-        "обычная": "⬜",
-        "редкая": "🟦",
-        "эпическая": "🟪",
-        "мифическая": "🌟",
-        "легендарная": "👑",
-        "секретная": "🔮"
-    }
-    
-    text = f"👤 **Твой профиль**\n\n"
-    text += f"💰 Баланс: {balance} монет\n"
-    text += f"🃏 Всего карточек: {total_cards}\n\n"
-    text += "📊 **По редкости:**\n"
-    for rarity, count in rarity_counts.items():
-        emoji = rarity_emojis.get(rarity, "🃏")
-        text += f"{emoji} {rarity}: {count}\n"
-    
-    # Показываем последние 5 карточек
-    if cards:
-        text += "\n🃏 **Последние карточки:**\n"
-        for card in cards[-5:]:
-            emoji = rarity_emojis.get(card.get("rarity", "обычная"), "🃏")
-            text += f"{emoji} {card.get('name', 'Неизвестно')}\n"
-    
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-async def auction(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Главное меню аукциона."""
-    args = context.args
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    
-    if not args:
-        # Показываем список активных лотов
-        auction_data = load_auction()
-        if not auction_data:
-            await update.message.reply_text("📭 На аукционе пока нет лотов.\n\n"
-                                          "Чтобы выставить карточку:\n"
-                                          "`/ah sell <instance_id> <цена>`\n"
-                                          "Чтобы посмотреть список своих карточек:\n"
-                                          "`/profile`",
-                                          parse_mode="Markdown")
-            return
-        
-        text = "🏷️ **Активные лоты:**\n\n"
-        for lot_id, lot in list(auction_data.items())[:10]:
-            seller = lot.get("seller", "Неизвестно")
-            card_name = lot.get("card_name", "Карточка")
-            price = lot.get("price", 0)
-            text += f"• {card_name} — {price} монет (от {seller})\n"
-            text += f"  `/ah buy {lot_id}`\n"
-        
-        await update.message.reply_text(text, parse_mode="Markdown")
-        return
-    
-    if args[0].lower() == "sell":
-        # /ah sell <instance_id> <цена>
-        if len(args) < 3:
-            await update.message.reply_text("❌ Использование: `/ah sell <instance_id> <цена>`", parse_mode="Markdown")
-            return
-        
-        instance_id = args[1]
-        try:
-            price = int(args[2])
-            if price <= 0:
-                await update.message.reply_text("❌ Цена должна быть больше 0!")
-                return
-        except ValueError:
-            await update.message.reply_text("❌ Цена должна быть числом!")
-            return
-        
-        # Проверяем, есть ли у пользователя такая карточка
-        user_data = get_user_card_data(user_id)
-        card_found = None
-        for card in user_data.get("cards", []):
-            if card.get("instance_id") == instance_id:
-                card_found = card
-                break
-        
-        if not card_found:
-            await update.message.reply_text("❌ У тебя нет такой карточки!")
-            return
-        
-        # Удаляем карточку из инвентаря пользователя
-        user_data["cards"] = [c for c in user_data["cards"] if c.get("instance_id") != instance_id]
-        save_user_card_data(user_id, user_data)
-        
-        # Добавляем в аукцион
-        auction_data = load_auction()
-        lot_id = f"lot_{int(time.time()*1000)}_{random.randint(1000,9999)}"
-        auction_data[lot_id] = {
-            "seller": user_id,
-            "card_name": card_found.get("name", "Карточка"),
-            "card_id": card_found.get("card_id", "unknown"),
-            "rarity": card_found.get("rarity", "обычная"),
-            "file_id": card_found.get("file_id", ""),
-            "instance_id": instance_id,
-            "price": price,
-            "created": datetime.now().isoformat()
-        }
-        save_auction(auction_data)
-        
-        await update.message.reply_text(f"✅ Карточка **{card_found.get('name')}** выставлена на аукцион за {price} монет!")
-        return
-    
-    if args[0].lower() == "buy":
-        # /ah buy <lot_id>
-        if len(args) < 2:
-            await update.message.reply_text("❌ Использование: `/ah buy <lot_id>`", parse_mode="Markdown")
-            return
-        
-        lot_id = args[1]
-        auction_data = load_auction()
-        lot = auction_data.get(lot_id)
-        if not lot:
-            await update.message.reply_text("❌ Лот не найден или уже продан!")
-            return
-        
-        seller_id = lot.get("seller")
-        price = lot.get("price", 0)
-        
-        if seller_id == user_id:
-            await update.message.reply_text("❌ Ты не можешь купить свою карточку!")
-            return
-        
-        # Проверяем баланс покупателя
-        buyer_balance = get_user_balance(user_id)
-        if buyer_balance < price:
-            await update.message.reply_text(f"❌ Недостаточно монет! Нужно {price} монет.")
-            return
-        
-        # Проверяем, есть ли карточка у продавца
-        seller_data = get_user_card_data(seller_id)
-        card_to_transfer = None
-        for card in seller_data.get("cards", []):
-            if card.get("instance_id") == lot.get("instance_id"):
-                card_to_transfer = card
-                break
-        
-        if not card_to_transfer:
-            await update.message.reply_text("❌ Ошибка! Карточка больше не доступна.")
-            auction_data.pop(lot_id, None)
-            save_auction(auction_data)
-            return
-        
-        # Транзакция
-        # Списываем у покупателя
-        update_user_balance(user_id, -price)
-        # Добавляем продавцу
-        update_user_balance(seller_id, price)
-        # Удаляем у продавца
-        seller_data["cards"] = [c for c in seller_data["cards"] if c.get("instance_id") != lot.get("instance_id")]
-        save_user_card_data(seller_id, seller_data)
-        # Добавляем покупателю
-        buyer_data = get_user_card_data(user_id)
-        buyer_data["cards"].append(card_to_transfer)
-        buyer_data["total_cards"] += 1
-        save_user_card_data(user_id, buyer_data)
-        # Удаляем лот
-        auction_data.pop(lot_id, None)
-        save_auction(auction_data)
-        
-        await update.message.reply_text(f"✅ Поздравляем! Ты купил **{lot.get('card_name')}** за {price} монет!")
-        return
-    
-    await update.message.reply_text("❌ Неизвестная команда. Используй `/ah sell` или `/ah buy`", parse_mode="Markdown")
-    
-
-# ==================== КАРТОЧКИ (КОМАНДЫ) ====================
-async def card(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    message = update.message
-
-    now = datetime.now()
-    if user_id in card_cooldowns:
-        time_left = card_cooldowns[user_id] + timedelta(minutes=10) - now
-        if time_left > timedelta(0):
-            m, s = divmod(time_left.seconds, 60)
-            await message.reply_text(f"⏳ Подожди {m} мин {s} сек перед следующим открытием!")
-            return
-
-    kb = [
-        [
-            InlineKeyboardButton("🎴 Обычная (бесплатно)", callback_data="card_free"),
-            InlineKeyboardButton("💎 Платная (50 монет)", callback_data="card_premium"),
-        ]
-    ]
-    await message.reply_text(
-        "🎴 **Открыть карточку!**\n\n"
-        "Выбери тип прокрутки:\n"
-        "• Обычная — бесплатно, но шансы ниже\n"
-        "• Платная — 50 монет, шансы выше\n\n"
-        f"💰 Твой баланс: {get_user_balance(user_id)} монет",
-        reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode="Markdown"
-    )
-    
-async def auction(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    
-    if not args:
-        auction_data = load_auction()
-        if not auction_data:
-            await update.message.reply_text("📭 На аукционе пока нет лотов.\n\n"
-                                          "Чтобы выставить карточку:\n"
-                                          "`/ah sell <instance_id> <цена>`\n"
-                                          "Чтобы посмотреть список своих карточек:\n"
-                                          "`/profile`",
-                                          parse_mode="Markdown")
-            return
-        
-        text = "🏷️ **Активные лоты:**\n\n"
-        for lot_id, lot in list(auction_data.items())[:10]:
-            seller = lot.get("seller", "Неизвестно")
-            card_name = lot.get("card_name", "Карточка")
-            price = lot.get("price", 0)
-            text += f"• {card_name} — {price} монет (от {seller})\n"
-            text += f"  `/ah buy {lot_id}`\n"
-        
-        await update.message.reply_text(text, parse_mode="Markdown")
-        return
-    
-    if args[0].lower() == "sell":
-        if len(args) < 3:
-            await update.message.reply_text("❌ Использование: `/ah sell <instance_id> <цена>`", parse_mode="Markdown")
-            return
-        
-        instance_id = args[1]
-        try:
-            price = int(args[2])
-            if price <= 0:
-                await update.message.reply_text("❌ Цена должна быть больше 0!")
-                return
-        except ValueError:
-            await update.message.reply_text("❌ Цена должна быть числом!")
-            return
-        
-        user_data = get_user_card_data(user_id)
-        card_found = None
-        for card in user_data.get("cards", []):
-            if card.get("instance_id") == instance_id:
-                card_found = card
-                break
-        
-        if not card_found:
-            await update.message.reply_text("❌ У тебя нет такой карточки!")
-            return
-        
-        user_data["cards"] = [c for c in user_data["cards"] if c.get("instance_id") != instance_id]
-        save_user_card_data(user_id, user_data)
-        
-        auction_data = load_auction()
-        lot_id = f"lot_{int(time.time()*1000)}_{random.randint(1000,9999)}"
-        auction_data[lot_id] = {
-            "seller": user_id,
-            "card_name": card_found.get("name", "Карточка"),
-            "card_id": card_found.get("card_id", "unknown"),
-            "rarity": card_found.get("rarity", "обычная"),
-            "file_id": card_found.get("file_id", ""),
-            "instance_id": instance_id,
-            "price": price,
-            "created": datetime.now().isoformat()
-        }
-        save_auction(auction_data)
-        
-        await update.message.reply_text(f"✅ Карточка **{card_found.get('name')}** выставлена на аукцион за {price} монет!")
-        return
-    
-    if args[0].lower() == "buy":
-        if len(args) < 2:
-            await update.message.reply_text("❌ Использование: `/ah buy <lot_id>`", parse_mode="Markdown")
-            return
-        
-        lot_id = args[1]
-        auction_data = load_auction()
-        lot = auction_data.get(lot_id)
-        if not lot:
-            await update.message.reply_text("❌ Лот не найден или уже продан!")
-            return
-        
-        seller_id = lot.get("seller")
-        price = lot.get("price", 0)
-        
-        if seller_id == user_id:
-            await update.message.reply_text("❌ Ты не можешь купить свою карточку!")
-            return
-        
-        buyer_balance = get_user_balance(user_id)
-        if buyer_balance < price:
-            await update.message.reply_text(f"❌ Недостаточно монет! Нужно {price} монет.")
-            return
-        
-        seller_data = get_user_card_data(seller_id)
-        card_to_transfer = None
-        for card in seller_data.get("cards", []):
-            if card.get("instance_id") == lot.get("instance_id"):
-                card_to_transfer = card
-                break
-        
-        if not card_to_transfer:
-            await update.message.reply_text("❌ Ошибка! Карточка больше не доступна.")
-            auction_data.pop(lot_id, None)
-            save_auction(auction_data)
-            return
-        
-        update_user_balance(user_id, -price)
-        update_user_balance(seller_id, price)
-        
-        seller_data["cards"] = [c for c in seller_data["cards"] if c.get("instance_id") != lot.get("instance_id")]
-        save_user_card_data(seller_id, seller_data)
-        
-        buyer_data = get_user_card_data(user_id)
-        buyer_data["cards"].append(card_to_transfer)
-        buyer_data["total_cards"] += 1
-        save_user_card_data(user_id, buyer_data)
-        
-        auction_data.pop(lot_id, None)
-        save_auction(auction_data)
-        
-        await update.message.reply_text(f"✅ Поздравляем! Ты купил **{lot.get('card_name')}** за {price} монет!")
-        return
-    
-    await update.message.reply_text("❌ Неизвестная команда. Используй `/ah sell` или `/ah buy`", parse_mode="Markdown")
-
-# ==================== АДМИН-КОМАНДЫ ДЛЯ КАРТОЧЕК ====================
-async def list_cards(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Нет прав!")
-        return
-    cards = load_cards_data()
-    if not cards:
-        await update.message.reply_text("📭 Нет карточек!")
-        return
-    text = "🃏 **Список всех карточек:**\n\n"
-    rarity_order = {"обычная": 0, "редкая": 1, "эпическая": 2, "мифическая": 3, "легендарная": 4, "секретная": 5}
-    sorted_cards = sorted(cards.items(), key=lambda x: rarity_order.get(x[1].get("rarity", "обычная"), 99))
-    for card_id, card in sorted_cards:
-        rarity = card.get("rarity", "неизвестно")
-        emoji = {"обычная": "⬜", "редкая": "🟦", "эпическая": "🟪", "мифическая": "🌟", "легендарная": "👑", "секретная": "🔮"}.get(rarity, "🃏")
-        text += f"{emoji} `{card_id}` — {card.get('name', 'Без названия')} ({rarity})\n"
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-async def add_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Нет прав!")
-        return
-    args = context.args
-    if len(args) < 4:
-        await update.message.reply_text(
-            "❌ Использование:\n"
-            "`/addcard <id> <название> <редкость> <file_id>`\n\n"
-            "Редкости: обычная, редкая, эпическая, мифическая, легендарная, секретная\n"
-            "Пример: `/addcard my_card_1 Моя карточка легендарная AgACAgIAAxkBAAIB...`",
-            parse_mode="Markdown"
-        )
-        return
-    card_id = args[0]
-    name = args[1]
-    rarity = args[2].lower()
-    file_id = args[3]
-    valid_rarities = ["обычная", "редкая", "эпическая", "мифическая", "легендарная", "секретная"]
-    if rarity not in valid_rarities:
-        await update.message.reply_text(f"❌ Недопустимая редкость! Доступны: {', '.join(valid_rarities)}")
-        return
-    cards = load_cards_data()
-    if card_id in cards:
-        await update.message.reply_text(f"❌ Карточка с ID `{card_id}` уже существует!", parse_mode="Markdown")
-        return
-    cards[card_id] = {"name": name, "rarity": rarity, "file_id": file_id}
-    save_cards_data(cards)
-    await update.message.reply_text(f"✅ Карточка **{name}** (ID: `{card_id}`) добавлена!", parse_mode="Markdown")
-
-async def remove_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Нет прав!")
-        return
-    args = context.args
-    if not args:
-        await update.message.reply_text("❌ Использование: `/removecard <card_id>`", parse_mode="Markdown")
-        return
-    card_id = args[0]
-    cards = load_cards_data()
-    if card_id not in cards:
-        await update.message.reply_text(f"❌ Карточка с ID `{card_id}` не найдена!", parse_mode="Markdown")
-        return
-    card_name = cards[card_id].get("name", "Без названия")
-    del cards[card_id]
-    save_cards_data(cards)
-    await update.message.reply_text(f"✅ Карточка **{card_name}** (ID: `{card_id}`) удалена!", parse_mode="Markdown")
-
-async def edit_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Нет прав!")
-        return
-    args = context.args
-    if len(args) < 3:
-        await update.message.reply_text(
-            "❌ Использование:\n"
-            "`/editcard <card_id> <поле> <новое_значение>`\n\n"
-            "Доступные поля: name, rarity, file_id\n"
-            "Пример: `/editcard common_1 name Новая карточка`",
-            parse_mode="Markdown"
-        )
-        return
-    card_id = args[0]
-    field = args[1].lower()
-    new_value = " ".join(args[2:]) if len(args) > 2 else ""
-    if not new_value:
-        await update.message.reply_text("❌ Укажи новое значение!")
-        return
-    valid_fields = ["name", "rarity", "file_id"]
-    if field not in valid_fields:
-        await update.message.reply_text(f"❌ Доступные поля: {', '.join(valid_fields)}")
-        return
-    cards = load_cards_data()
-    if card_id not in cards:
-        await update.message.reply_text(f"❌ Карточка с ID `{card_id}` не найдена!", parse_mode="Markdown")
-        return
-    if field == "rarity":
-        valid_rarities = ["обычная", "редкая", "эпическая", "мифическая", "легендарная", "секретная"]
-        if new_value not in valid_rarities:
-            await update.message.reply_text(f"❌ Недопустимая редкость! Доступны: {', '.join(valid_rarities)}")
-            return
-    old_value = cards[card_id].get(field, "пусто")
-    cards[card_id][field] = new_value
-    save_cards_data(cards)
-    await update.message.reply_text(f"✅ Поле `{field}` карточки `{card_id}` обновлено!\nБыло: `{old_value}`\nСтало: `{new_value}`", parse_mode="Markdown")
-
-async def give_money(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Нет прав!")
-        return
-    args = context.args
-    if len(args) < 2:
-        await update.message.reply_text("❌ Использование: `/givemoney <user_id> <сумма>`", parse_mode="Markdown")
-        return
-    try:
-        target_id = int(args[0])
-        amount = int(args[1])
-    except ValueError:
-        await update.message.reply_text("❌ ID и сумма должны быть числами!")
-        return
-    if amount <= 0:
-        await update.message.reply_text("❌ Сумма должна быть больше 0!")
-        return
-    new_balance = update_user_balance(target_id, amount)
-    await update.message.reply_text(f"✅ Пользователю `{target_id}` выдано {amount} монет.\n💰 Новый баланс: {new_balance}", parse_mode="Markdown")
-
-async def getid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Нет прав!")
-        return
-    
-    reply = update.message.reply_to_message
-    if reply and reply.photo:
-        file_id = reply.photo[-1].file_id
-        await update.message.reply_text(f"✅ `{file_id}`", parse_mode="Markdown")
-    else:
-        await update.message.reply_text("❌ Ответь на сообщение с фото командой /getid")
-        
-
-# ==================== ТРИГГЕРЫ ====================
-async def handle_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    if not message or not message.text:
-        return
-    
-    text = message.text.strip()
-    text_lower = text.lower()
-    
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    
-    if "бугульма" in text_lower:
-        save_chat_id(chat_id)
-        add_activity(chat_id, user_id)
-        cool, remain = check_cd(chat_id, user_id, 'folk')
-        if cool:
-            seconds_left = max(0, int(remain.total_seconds()))
-            m, s = divmod(seconds_left, 60)
-            await message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
-            return
-        if ALL_STICKERS:
-            await message.reply_sticker(sticker=random.choice(ALL_STICKERS))
-            use_cd(chat_id, user_id, 'folk')
-        return
-    
-    if "литвин" in text_lower:
-        save_chat_id(chat_id)
-        add_activity(chat_id, user_id)
-        cool, remain = check_cd(chat_id, user_id, 'litvin')
-        if cool:
-            seconds_left = max(0, int(remain.total_seconds()))
-            m, s = divmod(seconds_left, 60)
-            await message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
-            return
-        if litvin_stickers:
-            await message.reply_sticker(sticker=random.choice(litvin_stickers))
-            use_cd(chat_id, user_id, 'litvin')
-        return
-    
-    if "бред" in text_lower:
-        save_chat_id(chat_id)
-        add_activity(chat_id, user_id)
-        cool, remain = check_cd(chat_id, user_id, 'bred')
-        if cool:
-            seconds_left = max(0, int(remain.total_seconds()))
-            m, s = divmod(seconds_left, 60)
-            await message.reply_text(f"⏳ {m} мин {s} сек", quote=True)
-            return
-        if bred_stickers:
-            await message.reply_sticker(sticker=random.choice(bred_stickers))
-            use_cd(chat_id, user_id, 'bred')
-        return
-    
-    if text_lower == "мой факт":
-        save_chat_id(chat_id)
-        add_activity(chat_id, user_id)
-        fact = random.choice(FACTS)
-        user = update.effective_user
-        await message.reply_text(
-            f"🧠 **Факт о тебе, {user.first_name}:**\n\n{fact}",
-            parse_mode="Markdown"
-        )
-        return
-    
-    if text_lower in ["моё животное", "мое животное"]:
-        save_chat_id(chat_id)
-        add_activity(chat_id, user_id)
-        animal_data = random.choice(ANIMALS)
-        await message.reply_text(
-            f"🐾 **Ты — {animal_data['name']}!**\n\n{animal_data['emoji']} {animal_data['description']}",
-            parse_mode="Markdown"
-        )
-        return
-    
-    if text in ["п", "П", "p", "P"]:
-        save_chat_id(chat_id)
-        add_activity(chat_id, user_id)
-        await message.reply_text("п")
-        return
-
-# ==================== КУЛДАУНЫ ====================
-async def cooldown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat_id(update.effective_chat.id)
-    add_activity(update.effective_chat.id, update.effective_user.id)
-    chat, user = update.effective_chat, update.effective_user
-    if chat.type not in ("group", "supergroup"):
-        return
-    try:
-        admins = await context.bot.get_chat_administrators(chat.id)
-        owner = next((a for a in admins if a.status == ChatMemberStatus.OWNER), None)
-        if not owner or user.id != owner.user.id:
-            await update.message.reply_text("Только создатель группы.")
-            return
-    except:
-        await update.message.reply_text("Бот должен быть админом.")
-        return
-    f, l, b, s, v = get_cd(chat.id, 'folk'), get_cd(chat.id, 'litvin'), get_cd(chat.id, 'bred'), get_cd(chat.id, 'search'), get_cd(chat.id, 'voice')
-    kb = [
-        [InlineKeyboardButton(f"Folk ({f}с)", callback_data="cd:folk")],
-        [InlineKeyboardButton(f"Litvin ({l}с)", callback_data="cd:litvin")],
-        [InlineKeyboardButton(f"Bred ({b}с)", callback_data="cd:bred")],
-        [InlineKeyboardButton(f"Search ({s}с)", callback_data="cd:search")],
-        [InlineKeyboardButton(f"Voice ({v}с)", callback_data="cd:voice")],
-    ]
-    await update.message.reply_text(
-        f"⚙️ Кулдауны:\n/folk: {f}с\n/litvin: {l}с\n/bred: {b}с\n/search: {s}с\n/voice: {v}с\n\nВыбери команду:",
-        reply_markup=InlineKeyboardMarkup(kb)
-    )
-
-async def cd_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    chat_id, user = q.message.chat_id, q.from_user
-    cmd = q.data.split(":")[1]
-    pending_cooldown_input[(chat_id, user.id)] = cmd
-    await q.answer()
-    await q.edit_message_text(f"Введи новый кулдаун для /{cmd} (0-3600 сек):")
-
-async def cd_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    key = (update.effective_chat.id, update.effective_user.id)
-    if key not in pending_cooldown_input:
-        return
-    cmd = pending_cooldown_input.pop(key)
-    text = update.message.text.strip()
-    if not text.isdigit():
-        await update.message.reply_text("Нужно число. Отмена.")
-        return
-    sec = int(text)
-    if not 0 <= sec <= 3600:
-        await update.message.reply_text("0-3600. Отмена.")
-        return
-    if update.effective_chat.id not in chat_cooldowns:
-        chat_cooldowns[update.effective_chat.id] = {}
-    chat_cooldowns[update.effective_chat.id][cmd] = sec
-    await update.message.reply_text(f"✅ /{cmd}: {sec}с")
-
-async def handle_text_router(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    """Направляет текст в нужный обработчик."""
-
-    if not update.message or not update.message.text:
-        return
-
-    user = update.effective_user
-    chat = update.effective_chat
-
-    if not user or not chat:
-        return
-
-    # Ввод текста для рассылки администратора
-    if user.id == ADMIN_ID and user.id in pending_broadcast_all:
-        await handle_broadcast_all_input(update, context)
-        return
-
-    # Ввод нового кулдауна
-    key = (chat.id, user.id)
-
-    if key in pending_cooldown_input:
-        await cd_input(update, context)
-        return
-
-    # Обычные текстовые триггеры
-    await handle_triggers(update, context)
-    
-# ==================== ИНЛАЙН ====================
-async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Return a sticker for inline queries; inline updates have no effective_chat."""
-    query = update.inline_query
-    if query is None:
-        return
-    if not ALL_STICKERS:
-        await query.answer([], cache_time=0, is_personal=True)
-        return
-    sticker_id = random.choice(ALL_STICKERS)
-    await query.answer(
-        [InlineQueryResultCachedSticker(
-            id=str(random.randint(100000, 999999)),
-            sticker_file_id=sticker_id,
-        )],
-        cache_time=0,
-        is_personal=True,
-    )
-async def unhandled_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if query:
-        try:
-            await query.answer("Эта кнопка устарела. Открой меню заново.", show_alert=True)
-        except Exception:
-            logging.debug("Не удалось ответить на устаревший callback", exc_info=True)
-
-
-async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    """Log callback/handler failures and show a useful alert when possible."""
-    error = context.error
-    if error:
-        logging.error(
-            "Ошибка обработчика update=%r: %s",
-            getattr(update, "update_id", None), error,
-            exc_info=(type(error), error, error.__traceback__),
-        )
-    else:
-        logging.error("Неизвестная ошибка при обработке update=%r", getattr(update, "update_id", None))
-    query = getattr(update, "callback_query", None)
-    if query:
-        try:
-            await query.answer("Произошла ошибка. Попробуй ещё раз; подробности записаны в лог.", show_alert=True)
+            uname = f"@{user.username}" if user.username else user.first_name
+            await bot.send_message(ADMIN_ID,
+                f"🔮 **СЕКРЕТНАЯ!**\n\n👤 {uname} (ID: `{user.id}`)\n🃏 **{card_data['name']}**\n💰 {get_user_balance(user_id)}",
+                parse_mode="Markdown")
         except Exception:
             pass
 
 
-# ==================== FLASK ====================
+# ============================================================
+# КАРТОЧКИ (команды)
+# ============================================================
+
+@router.message(Command("card"))
+async def card(message: Message):
+    user_id = message.from_user.id
+    now = datetime.now()
+    if user_id in card_cooldowns:
+        tl = card_cooldowns[user_id] + timedelta(minutes=10) - now
+        if tl > timedelta(0):
+            m, s = divmod(int(tl.total_seconds()), 60)
+            await message.answer(f"⏳ Подожди {m} мин {s} сек!")
+            return
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🎴 Обычная (0)", callback_data="card_free"),
+        InlineKeyboardButton(text="💎 Платная (50)", callback_data="card_premium"),
+    ]])
+    await message.answer(
+        f"🎴 **Открыть карточку!**\n\n💰 Баланс: {get_user_balance(user_id)}",
+        reply_markup=kb, parse_mode="Markdown"
+    )
+
+
+@router.message(Command("profile"))
+async def profile(message: Message):
+    user_id = message.from_user.id
+    ud = get_user_card_data(user_id)
+    cards = ud.get("cards", [])
+    rc = {}
+    for c in cards:
+        r = c.get("rarity", "неизвестно")
+        rc[r] = rc.get(r, 0) + 1
+    emojis = {"обычная": "⬜", "редкая": "🟦", "эпическая": "🟪",
+              "мифическая": "🌟", "легендарная": "👑", "секретная": "🔮"}
+    text = f"👤 **Профиль**\n\n💰 {ud.get('balance', 0)}\n🃏 Всего: {ud.get('total_cards', 0)}\n\n📊 **Редкости:**\n"
+    for r, c in rc.items():
+        text += f"{emojis.get(r, '🃏')} {r}: {c}\n"
+    if cards:
+        text += "\n🃏 **Последние 5:**\n"
+        for c in cards[-5:]:
+            text += f"{emojis.get(c.get('rarity', 'обычная'), '🃏')} {c.get('name', '?')}\n"
+    await message.answer(text, parse_mode="Markdown")
+
+
+@router.message(Command("ah"))
+@router.message(Command("auction"))
+async def auction(message: Message):
+    args = get_args(message)
+    user_id = message.from_user.id
+    if not args:
+        a = load_auction()
+        if not a:
+            await message.answer("📭 Нет лотов.\n\n`/ah sell <instance_id> <цена>`", parse_mode="Markdown")
+            return
+        text = "🏷️ **Лоты:**\n\n"
+        for lot_id, lot in list(a.items())[:10]:
+            text += f"• {lot.get('card_name', '?')} — {lot.get('price', 0)} (от {lot.get('seller', '?')})\n  `/ah buy {lot_id}`\n"
+        await message.answer(text, parse_mode="Markdown")
+        return
+    if args[0].lower() == "sell":
+        if len(args) < 3:
+            await message.answer("❌ `/ah sell <instance_id> <цена>`", parse_mode="Markdown")
+            return
+        instance_id = args[1]
+        try:
+            price = int(args[2])
+            if price <= 0:
+                raise ValueError
+        except ValueError:
+            await message.answer("❌ Цена > 0!")
+            return
+        ud = get_user_card_data(user_id)
+        card_found = next((c for c in ud.get("cards", []) if c.get("instance_id") == instance_id), None)
+        if not card_found:
+            await message.answer("❌ Нет такой карточки!")
+            return
+        ud["cards"] = [c for c in ud["cards"] if c.get("instance_id") != instance_id]
+        save_user_card_data(user_id, ud)
+        a = load_auction()
+        lot_id = f"lot_{int(time.time()*1000)}_{random.randint(1000,9999)}"
+        a[lot_id] = {
+            "seller": user_id, "card_name": card_found.get("name"),
+            "card_id": card_found.get("card_id"), "rarity": card_found.get("rarity"),
+            "file_id": card_found.get("file_id", ""), "instance_id": instance_id,
+            "price": price, "created": datetime.now().isoformat(),
+        }
+        save_auction(a)
+        await message.answer(f"✅ **{card_found.get('name')}** выставлена за {price}!")
+        return
+    if args[0].lower() == "buy":
+        if len(args) < 2:
+            await message.answer("❌ `/ah buy <lot_id>`", parse_mode="Markdown")
+            return
+        lot_id = args[1]
+        a = load_auction()
+        lot = a.get(lot_id)
+        if not lot:
+            await message.answer("❌ Лот не найден!")
+            return
+        seller_id = lot["seller"]
+        price = lot["price"]
+        if seller_id == user_id:
+            await message.answer("❌ Своя карточка!")
+            return
+        if get_user_balance(user_id) < price:
+            await message.answer(f"❌ Нужно {price} монет!")
+            return
+        sd = get_user_card_data(seller_id)
+        card_to_transfer = next((c for c in sd.get("cards", []) if c.get("instance_id") == lot.get("instance_id")), None)
+        if not card_to_transfer:
+            await message.answer("❌ Карточка недоступна!")
+            a.pop(lot_id, None)
+            save_auction(a)
+            return
+        update_user_balance(user_id, -price)
+        update_user_balance(seller_id, price)
+        sd["cards"] = [c for c in sd["cards"] if c.get("instance_id") != lot.get("instance_id")]
+        save_user_card_data(seller_id, sd)
+        bd = get_user_card_data(user_id)
+        bd["cards"].append(card_to_transfer)
+        bd["total_cards"] += 1
+        save_user_card_data(user_id, bd)
+        a.pop(lot_id, None)
+        save_auction(a)
+        await message.answer(f"✅ Куплено **{lot.get('card_name')}** за {price}!")
+        return
+    await message.answer("❌ `/ah sell` или `/ah buy`", parse_mode="Markdown")
+
+
+# ============================================================
+# АДМИН КАРТОЧКИ
+# ============================================================
+
+@router.message(Command("listcards"))
+async def list_cards(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ Нет прав!")
+        return
+    cards = load_cards_data()
+    if not cards:
+        await message.answer("📭 Нет карточек!")
+        return
+    text = "🃏 **Все карточки:**\n\n"
+    order = {"обычная": 0, "редкая": 1, "эпическая": 2, "мифическая": 3, "легендарная": 4, "секретная": 5}
+    sorted_cards = sorted(cards.items(), key=lambda x: order.get(x[1].get("rarity", "обычная"), 99))
+    for cid, c in sorted_cards:
+        r = c.get("rarity", "?")
+        em = {"обычная": "⬜", "редкая": "🟦", "эпическая": "🟪",
+              "мифическая": "🌟", "легендарная": "👑", "секретная": "🔮"}.get(r, "🃏")
+        text += f"{em} `{cid}` — {c.get('name', '?')} ({r})\n"
+    await message.answer(text, parse_mode="Markdown")
+
+
+@router.message(Command("addcard"))
+async def add_card(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ Нет прав!")
+        return
+    args = get_args(message)
+    if len(args) < 4:
+        await message.answer("❌ `/addcard <id> <название> <редкость> <file_id>`", parse_mode="Markdown")
+        return
+    card_id, name, rarity, file_id = args[0], args[1], args[2].lower(), args[3]
+    if rarity not in ["обычная", "редкая", "эпическая", "мифическая", "легендарная", "секретная"]:
+        await message.answer("❌ Неверная редкость!")
+        return
+    cards = load_cards_data()
+    if card_id in cards:
+        await message.answer(f"❌ ID `{card_id}` уже есть!", parse_mode="Markdown")
+        return
+    cards[card_id] = {"name": name, "rarity": rarity, "file_id": file_id}
+    save_cards_data(cards)
+    await message.answer(f"✅ **{name}** добавлена!", parse_mode="Markdown")
+
+
+@router.message(Command("removecard"))
+async def remove_card(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ Нет прав!")
+        return
+    args = get_args(message)
+    if not args:
+        await message.answer("❌ `/removecard <id>`", parse_mode="Markdown")
+        return
+    cards = load_cards_data()
+    if args[0] not in cards:
+        await message.answer(f"❌ `{args[0]}` не найдена!", parse_mode="Markdown")
+        return
+    name = cards[args[0]].get("name", "?")
+    del cards[args[0]]
+    save_cards_data(cards)
+    await message.answer(f"✅ **{name}** удалена!", parse_mode="Markdown")
+
+
+@router.message(Command("editcard"))
+async def edit_card(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ Нет прав!")
+        return
+    args = get_args(message)
+    if len(args) < 3:
+        await message.answer("❌ `/editcard <id> <name|rarity|file_id> <значение>`", parse_mode="Markdown")
+        return
+    card_id, field = args[0], args[1].lower()
+    value = " ".join(args[2:])
+    if field not in ["name", "rarity", "file_id"]:
+        await message.answer("❌ Поля: name, rarity, file_id")
+        return
+    cards = load_cards_data()
+    if card_id not in cards:
+        await message.answer(f"❌ `{card_id}` не найдена!", parse_mode="Markdown")
+        return
+    if field == "rarity" and value not in ["обычная", "редкая", "эпическая", "мифическая", "легендарная", "секретная"]:
+        await message.answer("❌ Неверная редкость!")
+        return
+    old = cards[card_id].get(field, "?")
+    cards[card_id][field] = value
+    save_cards_data(cards)
+    await message.answer(f"✅ `{field}` обновлено: `{old}` → `{value}`", parse_mode="Markdown")
+
+
+@router.message(Command("givemoney"))
+async def give_money(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ Нет прав!")
+        return
+    args = get_args(message)
+    if len(args) < 2:
+        await message.answer("❌ `/givemoney <user_id> <сумма>`", parse_mode="Markdown")
+        return
+    try:
+        target = int(args[0])
+        amount = int(args[1])
+    except ValueError:
+        await message.answer("❌ Числа!")
+        return
+    if amount <= 0:
+        await message.answer("❌ Сумма > 0!")
+        return
+    nb = update_user_balance(target, amount)
+    await message.answer(f"✅ Выдано {amount} пользователю `{target}`. Новый баланс: {nb}", parse_mode="Markdown")
+
+
+@router.message(Command("getid"))
+async def getid(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ Нет прав!")
+        return
+    reply = message.reply_to_message
+    if reply and reply.photo:
+        await message.answer(f"✅ `{reply.photo[-1].file_id}`", parse_mode="Markdown")
+    else:
+        await message.answer("❌ Ответь на фото.")
+
+
+@router.message(Command("cooldown"))
+async def cooldown_cmd(message: Message):
+    save_chat_id(message.chat.id)
+    add_activity(message.chat.id, message.from_user.id)
+    if message.chat.type not in ("group", "supergroup"):
+        return
+    try:
+        admins = await bot.get_chat_administrators(message.chat.id)
+        owner = next((a for a in admins if a.status == "creator"), None)
+        if not owner or message.from_user.id != owner.user.id:
+            await message.answer("Только создатель группы.")
+            return
+    except Exception:
+        await message.answer("Бот должен быть админом.")
+        return
+    f = get_cd(message.chat.id, 'folk')
+    l = get_cd(message.chat.id, 'litvin')
+    b = get_cd(message.chat.id, 'bred')
+    s = get_cd(message.chat.id, 'search')
+    v = get_cd(message.chat.id, 'voice')
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"Folk ({f}с)", callback_data="cd:folk")],
+        [InlineKeyboardButton(text=f"Litvin ({l}с)", callback_data="cd:litvin")],
+        [InlineKeyboardButton(text=f"Bred ({b}с)", callback_data="cd:bred")],
+        [InlineKeyboardButton(text=f"Search ({s}с)", callback_data="cd:search")],
+        [InlineKeyboardButton(text=f"Voice ({v}с)", callback_data="cd:voice")],
+    ])
+    await message.answer(
+        f"⚙️ Кулдауны:\n/folk: {f}с\n/litvin: {l}с\n/bred: {b}с\n/search: {s}с\n/voice: {v}с",
+        reply_markup=kb
+    )
+
+
+# ============================================================
+# INLINE
+# ============================================================
+
+@router.inline_query()
+async def inline_query(query: InlineQuery):
+    if not ALL_STICKERS:
+        await query.answer([], cache_time=0, is_personal=True)
+        return
+    await query.answer(
+        [InlineQueryResultCachedSticker(
+            id=str(random.randint(100000, 999999)),
+            sticker_file_id=random.choice(ALL_STICKERS),
+        )],
+        cache_time=0, is_personal=True,
+    )
+
+
+# ============================================================
+# ОПЛАТА (STARS)
+# ============================================================
+
+@router.pre_checkout_query()
+async def precheckout_callback(query: PreCheckoutQuery):
+    try:
+        parts = query.invoice_payload.split("_", 3)
+        valid = (len(parts) == 4 and parts[0] == "donation"
+                 and int(parts[1]) == query.from_user.id
+                 and query.currency == "XTR"
+                 and query.total_amount == int(parts[2])
+                 and int(parts[2]) > 0)
+    except Exception:
+        valid = False
+    if not valid:
+        await query.answer(ok=False, error_message="Данные счёта не совпадают.")
+        return
+    await query.answer(ok=True)
+
+
+@router.message(F.successful_payment)
+async def payment_successful(message: Message):
+    payment = message.successful_payment
+    if not payment or payment.currency != "XTR":
+        return
+    charge_id = payment.telegram_payment_charge_id
+    if not hasattr(bot, "_processed_payments"):
+        bot._processed_payments = set()
+    if charge_id and charge_id in bot._processed_payments:
+        return
+    add_donation(message.from_user.id, payment.total_amount)
+    if charge_id:
+        bot._processed_payments.add(charge_id)
+    await message.answer(
+        f"🌟 Спасибо за донат!\n\nТы пожертвовал {payment.total_amount} звёзд.\n"
+        f"Твой вклад помогает боту развиваться! 🙌"
+    )
+
+
+# ============================================================
+# НОВЫЕ УЧАСТНИКИ
+# ============================================================
+
+@router.message(F.new_chat_members)
+async def welcome_new_member(message: Message):
+    save_chat_id(message.chat.id)
+    for member in message.new_chat_members:
+        if member.id == bot.id:
+            continue
+        name = f"@{member.username}" if member.username else member.first_name
+        await message.answer(f"h {name} !")
+
+
+# ============================================================
+# ТРИГГЕРЫ И ТЕКСТОВЫЙ РОУТЕР (В КОНЦЕ!)
+# ============================================================
+
+async def handle_triggers(message: Message):
+    text = (message.text or "").strip()
+    tl = text.lower()
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+
+    if "бугульма" in tl:
+        save_chat_id(chat_id)
+        add_activity(chat_id, user_id)
+        cool, remain = check_cd(chat_id, user_id, 'folk')
+        if cool:
+            s = max(0, int(remain.total_seconds()))
+            m, sec = divmod(s, 60)
+            await message.answer(f"⏳ {m} мин {sec} сек", reply_to_message_id=message.message_id)
+            return
+        if ALL_STICKERS:
+            await message.answer_sticker(sticker=random.choice(ALL_STICKERS))
+            use_cd(chat_id, user_id, 'folk')
+        return
+    if "литвин" in tl:
+        save_chat_id(chat_id)
+        add_activity(chat_id, user_id)
+        cool, remain = check_cd(chat_id, user_id, 'litvin')
+        if cool:
+            s = max(0, int(remain.total_seconds()))
+            m, sec = divmod(s, 60)
+            await message.answer(f"⏳ {m} мин {sec} сек", reply_to_message_id=message.message_id)
+            return
+        if litvin_stickers:
+            await message.answer_sticker(sticker=random.choice(litvin_stickers))
+            use_cd(chat_id, user_id, 'litvin')
+        return
+    if "бред" in tl:
+        save_chat_id(chat_id)
+        add_activity(chat_id, user_id)
+        cool, remain = check_cd(chat_id, user_id, 'bred')
+        if cool:
+            s = max(0, int(remain.total_seconds()))
+            m, sec = divmod(s, 60)
+            await message.answer(f"⏳ {m} мин {sec} сек", reply_to_message_id=message.message_id)
+            return
+        if bred_stickers:
+            await message.answer_sticker(sticker=random.choice(bred_stickers))
+            use_cd(chat_id, user_id, 'bred')
+        return
+    if tl == "мой факт":
+        save_chat_id(chat_id)
+        add_activity(chat_id, user_id)
+        fact = random.choice(FACTS)
+        await message.answer(f"🧠 **Факт о тебе, {message.from_user.first_name}:**\n\n{fact}", parse_mode="Markdown")
+        return
+    if tl in ["моё животное", "мое животное"]:
+        save_chat_id(chat_id)
+        add_activity(chat_id, user_id)
+        a = random.choice(ANIMALS)
+        await message.answer(f"🐾 **Ты — {a['name']}!**\n\n{a['emoji']} {a['description']}", parse_mode="Markdown")
+        return
+    if text in ["п", "П", "p", "P"]:
+        save_chat_id(chat_id)
+        add_activity(chat_id, user_id)
+        await message.answer("п")
+        return
+
+
+async def handle_broadcast_all_input(message: Message):
+    uid = message.from_user.id
+    if uid not in pending_broadcast_all:
+        return
+    del pending_broadcast_all[uid]
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("❌ Пусто. Отменено.")
+        return
+    try:
+        with open(CHATS_DB_FILE, "r", encoding="utf-8") as f:
+            ids = json.load(f)
+    except Exception:
+        await message.answer("❌ Нет чатов!")
+        return
+    if not ids:
+        await message.answer("❌ Пусто!")
+        return
+    status = await message.answer(f"🚀 Рассылка в {len(ids)}...")
+    sent = failed = 0
+    for cid in ids:
+        try:
+            await bot.send_message(cid, text, parse_mode="Markdown")
+            sent += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(0.3)
+    await status.edit_text(f"✅ Готово!\n📤 {sent}\n❌ {failed}\n📊 {len(ids)}")
+
+
+async def cd_input(message: Message):
+    key = (message.chat.id, message.from_user.id)
+    if key not in pending_cooldown_input:
+        return
+    cmd = pending_cooldown_input.pop(key)
+    text = (message.text or "").strip()
+    if not text.isdigit():
+        await message.answer("Нужно число. Отмена.")
+        return
+    sec = int(text)
+    if not 0 <= sec <= 3600:
+        await message.answer("0-3600. Отмена.")
+        return
+    chat_cooldowns.setdefault(message.chat.id, {})[cmd] = sec
+    await message.answer(f"✅ /{cmd}: {sec}с")
+
+
+@router.message(F.text)
+async def handle_text_router(message: Message):
+    if not message.text:
+        return
+    uid = message.from_user.id
+    if uid == ADMIN_ID and uid in pending_broadcast_all:
+        return await handle_broadcast_all_input(message)
+    key = (message.chat.id, uid)
+    if key in pending_cooldown_input:
+        return await cd_input(message)
+    if message.text.startswith("/"):
+        return
+    await handle_triggers(message)
+
+
+# ============================================================
+# ОШИБКИ
+# ============================================================
+
+async def global_error_handler(event):
+    log.error("Ошибка обработчика: %r", event.exception, exc_info=event.exception)
+
+
+# ============================================================
+# FLASK
+# ============================================================
 
 flask_app = Flask(__name__)
+
 
 @flask_app.route('/getUserGroups')
 def get_user_groups():
     uid = request.args.get('user_id', type=str)
     if not uid or not uid.lstrip('-').isdigit():
         return jsonify({"ok": False, "error": "user_id must be an integer"}), 400
-    try:
-        user_id = int(uid)
-    except (TypeError, ValueError):
-        return jsonify({"ok": False, "error": "invalid user_id"}), 400
-    return jsonify({"ok": True, "result": user_groups.get(user_id, [])})
+    return jsonify({"ok": True, "result": user_groups.get(int(uid), [])})
+
 
 def run_flask():
     flask_app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
 
-# FOLKK_PATCH_V1
-# ==================== ЗАПУСК ====================
-def main():
+
+# ============================================================
+# MAIN
+# ============================================================
+
+async def main():
+    global bot
     migrate_files()
     load_user_groups()
     load_stats()
 
-    app = Application.builder().token(TOKEN).build()
-    app.add_error_handler(global_error_handler)
+    bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    dp = Dispatcher()
+    dp.include_router(router)
+    dp.errors.register(global_error_handler)
 
-    # Команды
-    command_handlers = [
-        ("start", start),
-        ("folk", folk),
-        ("litvin", litvin),
-        ("bred", bred),
-        ("sosat", sosat),
-        ("zabava", zabava),
-        ("search", search),
-        ("voice", voice),
-        ("cat", cat),
-        ("dog", dog),
-        ("top", top),
-        ("game", game),
-        ("answer", answer),
-        ("cooldown", cooldown_cmd),
-        ("factme", factme),
-        ("animal", animal),
-        ("chats", chats),
-        ("go", go),
-        ("donate", donate),
-        ("donates", donates),
-        ("donate_broadcast", donate_broadcast),
-        ("cancel", cancel_broadcast),
-        ("spin", spin),
-        ("offer", offer),
-        ("card", card),
-        ("profile", profile),
-        ("ah", auction),
-        ("auction", auction),
-        ("listcards", list_cards),
-        ("addcard", add_card),
-        ("removecard", remove_card),
-        ("editcard", edit_card),
-        ("givemoney", give_money),
-        ("getid", getid),
-    ]
+    if MONITOR_CHAT_ID:
+        asyncio.create_task(monitor_loop())
 
-    for command, callback in command_handlers:
-        app.add_handler(CommandHandler(command, callback))
+    threading.Thread(target=run_flask, daemon=True, name="flask-server").start()
 
-    # Служебные обработчики
-    app.add_handler(
-        MessageHandler(
-            filters.StatusUpdate.NEW_CHAT_MEMBERS,
-            welcome_new_member,
-        )
-    )
+    log.info("Бот запускается! folk=%s litvin=%s bred=%s",
+             len(ALL_STICKERS), len(litvin_stickers), len(bred_stickers))
 
-    app.add_handler(
-        MessageHandler(
-            filters.SUCCESSFUL_PAYMENT,
-            payment_successful,
-        )
-    )
-
-    app.add_handler(
-        PreCheckoutQueryHandler(precheckout_callback)
-    )
-
-    app.add_handler(InlineQueryHandler(inline_query))
-
-    # Весь обычный текст направляется через одну функцию.
-    # Не добавляй отдельно handle_triggers, cd_input
-    # или handle_broadcast_all_input как MessageHandler.
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            handle_text_router,
-        )
-    )
-
-    # Кулдауны
-    app.add_handler(
-        CallbackQueryHandler(
-            cd_button,
-            pattern=r"^cd:(folk|litvin|bred|search|voice)$",
-        )
-    )
-
-    # Игры
-    app.add_handler(
-        CallbackQueryHandler(
-            game_callback,
-            pattern=r"^game_start:",
-        )
-    )
-
-    app.add_handler(
-        CallbackQueryHandler(
-            game_callback,
-            pattern=r"^game_stop:",
-        )
-    )
-
-    app.add_handler(
-        CallbackQueryHandler(
-            game_rps_callback,
-            pattern=r"^game_rps:",
-        )
-    )
-
-    # Донаты и рассылки
-    app.add_handler(
-        CallbackQueryHandler(
-            donate_callback,
-            pattern=r"^donate_",
-        )
-    )
-
-    app.add_handler(
-        CallbackQueryHandler(
-            broadcast_all_callback,
-            pattern=r"^broadcast_all$",
-        )
-    )
-
-    app.add_handler(
-        CallbackQueryHandler(
-            offer_callback,
-            pattern=r"^offer_",
-        )
-    )
-
-    # Карточки
-    app.add_handler(
-        CallbackQueryHandler(
-            card_callback,
-            pattern=r"^card_(free|premium)$",
-        )
-    )
-
-    # Обработка неизвестных и устаревших кнопок
-    app.add_handler(
-        CallbackQueryHandler(unhandled_callback)
-    )
-
-    # Мониторинг
-    if MONITOR_CHAT_ID and app.job_queue:
-        app.job_queue.run_repeating(
-            send_monitor_report,
-            interval=MONITOR_INTERVAL,
-            first=10,
-        )
-
-        logging.info(
-            "Мониторинг запущен! Интервал: %s минут",
-            MONITOR_INTERVAL // 60,
-        )
-
-    # Flask
-    threading.Thread(
-        target=run_flask,
-        daemon=True,
-        name="flask-server",
-    ).start()
-
-    logging.info(
-        "Бот запускается! Стикеров: folk=%s litvin=%s bred=%s",
-        len(ALL_STICKERS),
-        len(litvin_stickers),
-        len(bred_stickers),
-    )
-
-    app.run_polling()
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
-    main()
-    
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        pass
