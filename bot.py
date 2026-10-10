@@ -23,6 +23,7 @@ from aiogram.types import (
     Message, CallbackQuery, InlineQuery,
     InlineKeyboardMarkup, InlineKeyboardButton,
     InlineQueryResultCachedSticker, WebAppInfo, PreCheckoutQuery,
+    BufferedInputFile,
 )
 from aiogram.exceptions import TelegramBadRequest
 
@@ -30,18 +31,16 @@ from deep_translator import GoogleTranslator
 from gtts import gTTS
 from io import BytesIO
 
-# ==================== ТОКЕН ИЗ ОКРУЖЕНИЯ ====================
+# ==================== ТОКЕН ====================
 TOKEN = os.environ.get("API_TOKEN")
 if not TOKEN:
     raise ValueError("Переменная окружения API_TOKEN не установлена!")
 
 ADMIN_ID = 8371473442
 MINI_APP_URL = "https://jalal-p7p9.onrender.com"
-
 IMGBB_API_KEY = os.environ.get("IMGBB_API_KEY", "")
 UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "")
 
-# ==================== МОНИТОРИНГ ====================
 MONITOR_CHAT_ID = -1003805849851
 MONITOR_INTERVAL = 25 * 60
 START_TIME = datetime.now()
@@ -64,10 +63,11 @@ USER_CARDS_FILE = "/app/shared/user_cards.json"
 AUCTION_FILE = "/app/shared/auction_lots.json"
 card_cooldowns = {}
 
-# ==================== ВРЕМЕННЫЕ ДАННЫЕ ====================
+# ==================== СОСТОЯНИЕ ====================
 temp_donation_amounts = {}
 pending_broadcast_all = {}
 pending_cooldown_input = {}
+pending_sell = {}          # user_id -> instance_id (для /ah sell)
 user_stats = {}
 games = {}
 game_timers = {}
@@ -441,7 +441,7 @@ async def search_unsplash(query, per_page=10):
             return []
 
 
-# ==================== ВОПРОСЫ ДЛЯ /spin ====================
+# ==================== СПИСКИ ДАННЫХ ====================
 SPIN_QUESTIONS = [
     "Какая самая странная еда, которую ты пробовал?",
     "Если бы ты мог выбрать суперспособность, которая была бы абсолютно бесполезной — какую бы выбрал?",
@@ -460,7 +460,6 @@ SPIN_QUESTIONS = [
     "Если бы ты мог поменяться жизнью с любым человеком, с кем бы поменялся?",
 ]
 
-# ==================== СЛОВА ДЛЯ /sosat ====================
 RANDOM_WORDS = [
     "кот", "привет", "чайник", "Владимир", "мандарин", "космос", "велосипед",
     "одуванчик", "банан", "дракон", "шлёпа", "мем", "бот", "пельмень",
@@ -469,7 +468,6 @@ RANDOM_WORDS = [
     "огурец", "микрофон", "самокат", "трамвай", "облако", "одуван"
 ]
 
-# ==================== ФАКТЫ ====================
 FACTS = [
     "ты однажды пытался объяснить бабушке, что такое мем — и она до сих пор думает, что это новый вид супа",
     "ты платишь за подписку на музыку, но слушаешь только песни 90-х из своего детства",
@@ -617,7 +615,6 @@ FACTS = [
     "ты считаешь, что если ты смеёшься — значит, всё хорошо",
 ]
 
-# ==================== ЖИВОТНЫЕ ====================
 ANIMALS = [
     {"name": "Ленивец", "emoji": "🦥", "description": "Ты — ленивец! Твой девиз: «Зачем спешить, если можно не спешить?» Ты мастер ничегонеделания и любишь долго обдумывать даже самые простые решения."},
     {"name": "Кот", "emoji": "🐱", "description": "Ты — кот! Ты обожаешь внимание, но только когда тебе это нужно. В остальное время ты просто наблюдаешь за миром и иногда позволяешь себя гладить."},
@@ -646,7 +643,6 @@ ANIMALS = [
     {"name": "Крокодил", "emoji": "🐊", "description": "Ты — крокодил! Ты скрываешь свои эмоции, но внутри ты эмоциональный и иногда пускаешь слезу."},
 ]
 
-# ==================== СТИКЕРЫ ====================
 ALL_STICKERS = [
     "CAACAgIAAxUAAWokXU38_MuMDT7hhvRuZctYuCKJAALIoAACX-ToSLg5DDhF1X44OwQ",
     "CAACAgIAAxUAAWokXU3n6LDpd626aZfX7VT1CippAAKapAAC1p_wSAAByejMhUYpHjsE",
@@ -989,11 +985,10 @@ bred_stickers = [
     "CAACAgIAAxUAAWokZOpsqDAdFQ6r8cerAAHKHqhHgQACUYwAAvpheUjgqXeeJFOeoTsE",
     "CAACAgIAAxUAAWokZOqiAXiA3711Q_TyiPhyFzALAALakwACwD55SBox3domPjGROwQ",
     "CAACAgIAAxUAAWokZOrG40e6MTW66zTsxm4Z-loOAAJOmAACHOB4SE3Urosl5Hw4OwQ",
-        ]
-
+    ]
 
 # ============================================================
-# ХЭНДЛЕРЫ: КОМАНДЫ
+# КОМАНДЫ
 # ============================================================
 
 @router.message(Command("start"))
@@ -1010,7 +1005,7 @@ async def start(message: Message):
             "• `/game` — выбрать игру\n"
             "• `/answer` — ответ в игре\n"
             "• `/top` — топ активных\n"
-            "• `/spin` — чат-рулетка (только в группах)\n\n"
+            "• `/spin` — чат-рулетка (в группах)\n\n"
             "🐱 **Животные:**\n"
             "• `/cat`, `/dog`, `/animal`\n\n"
             "🧠 `/factme` — факт о тебе\n\n"
@@ -1149,7 +1144,7 @@ async def zabava(message: Message):
         if response.status_code != 200:
             await message.answer(f"❌ Ошибка генерации мема: {response.status_code}")
             return
-        await message.answer_photo(photo=response.content, caption="🎭 Твой мем готов!")
+        await message.answer_photo(photo=BufferedInputFile(response.content, filename="meme.png"), caption="🎭 Твой мем готов!")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
 
@@ -1196,7 +1191,10 @@ async def search(message: Message):
         try:
             response = await loop.run_in_executor(None, lambda: requests.get(url, timeout=15))
             if response.status_code == 200:
-                await message.answer_photo(photo=response.content, caption=caption if idx == 0 else "")
+                await message.answer_photo(
+                    photo=BufferedInputFile(response.content, filename="search.jpg"),
+                    caption=caption if idx == 0 else ""
+                )
         except Exception as e:
             await message.answer(f"❌ Ошибка: {e}")
     use_cd(chat_id, user_id, 'search')
@@ -1222,7 +1220,10 @@ async def voice(message: Message):
         audio_bytes = BytesIO()
         tts.write_to_fp(audio_bytes)
         audio_bytes.seek(0)
-        await message.answer_voice(voice=audio_bytes, caption="🔊 Озвучено!")
+        await message.answer_voice(
+            voice=BufferedInputFile(audio_bytes.read(), filename="voice.ogg"),
+            caption="🔊 Озвучено!"
+        )
         use_cd(chat_id, user_id, 'voice')
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
@@ -1237,7 +1238,7 @@ async def cat(message: Message):
         data = r.json()
         if data and "url" in data[0]:
             img = await asyncio.to_thread(requests.get, data[0]["url"], timeout=10)
-            await message.answer_photo(photo=img.content, caption="🐱 Мяу!")
+            await message.answer_photo(photo=BufferedInputFile(img.content, filename="cat.jpg"), caption="🐱 Мяу!")
         else:
             await message.answer("❌ Не удалось найти котика!")
     except Exception as e:
@@ -1253,7 +1254,7 @@ async def dog(message: Message):
         data = r.json()
         if data and "url" in data[0]:
             img = await asyncio.to_thread(requests.get, data[0]["url"], timeout=10)
-            await message.answer_photo(photo=img.content, caption="🐶 Гав!")
+            await message.answer_photo(photo=BufferedInputFile(img.content, filename="dog.jpg"), caption="🐶 Гав!")
         else:
             await message.answer("❌ Не удалось найти собачку!")
     except Exception as e:
@@ -1303,25 +1304,51 @@ async def animal(message: Message):
 
 @router.message(Command("spin"))
 async def spin(message: Message):
+    chat_id = message.chat.id
     if message.chat.type not in ("group", "supergroup"):
         await message.answer("🎲 Только в группах!")
         return
-    known = list(user_stats.get(message.chat.id, {}).keys())[:200]
-    candidates = []
+
+    candidates_map = {}
+
+    # 1. Активные участники (кого бот видел)
+    known = list(user_stats.get(chat_id, {}).keys())[:200]
     for uid in known:
         try:
-            m = await bot.get_chat_member(message.chat.id, int(uid))
+            m = await bot.get_chat_member(chat_id, int(uid))
             if m.user and not m.user.is_bot and m.status not in ("left", "kicked"):
-                candidates.append(m.user)
+                candidates_map[m.user.id] = m.user
         except Exception:
             pass
-    if not candidates:
-        await message.answer("Пока не знаю активных. Пусть участники напишут что-нибудь.")
+
+    # 2. Администраторы группы
+    try:
+        admins = await bot.get_chat_administrators(chat_id)
+        for a in admins:
+            if a.user and not a.user.is_bot:
+                candidates_map[a.user.id] = a.user
+    except Exception:
+        pass
+
+    if not candidates_map:
+        await message.answer(
+            "❌ Не могу собрать участников.\n"
+            "Пусть участники напишут что-нибудь в чат или дай боту права администратора."
+        )
         return
+
+    candidates = list(candidates_map.values())
     target = random.choice(candidates)
     q = random.choice(SPIN_QUESTIONS)
     name = f"@{target.username}" if target.username else (target.first_name or "Участник")
-    await message.answer(f"🎲 Чат-рулетка!\n\n👤 Выпал: {name}\n❓ {q}")
+
+    await message.answer(
+        f"🎲 **Чат-рулетка!**\n\n"
+        f"👥 В выборке: {len(candidates)} чел.\n"
+        f"👤 Выпал: {name}\n"
+        f"❓ {q}",
+        parse_mode="Markdown"
+    )
 
 
 @router.message(Command("offer"))
@@ -1474,8 +1501,11 @@ async def cancel_broadcast(message: Message):
     if uid in pending_broadcast_all:
         del pending_broadcast_all[uid]
         await message.answer("❌ Отменено.")
+    elif uid in pending_sell:
+        del pending_sell[uid]
+        await message.answer("❌ Продажа отменена.")
     else:
-        await message.answer("Нет активной рассылки.")
+        await message.answer("Нечего отменять.")
 
 
 # ============================================================
@@ -1567,7 +1597,7 @@ async def auto_end_game(chat_id):
 
 
 # ============================================================
-# КОЛБЭКИ
+# КОЛБЭКИ: ИГРЫ
 # ============================================================
 
 @router.callback_query(F.data.startswith("game_start:"))
@@ -1671,6 +1701,10 @@ async def game_rps_cb(query: CallbackQuery):
     )
 
 
+# ============================================================
+# КОЛБЭКИ: КУЛДАУНЫ / РАССЫЛКА / OFFER / DONATE
+# ============================================================
+
 @router.callback_query(F.data.startswith("cd:"))
 async def cd_button(query: CallbackQuery):
     cmd = query.data.split(":")[1]
@@ -1706,7 +1740,10 @@ async def offer_callback(query: CallbackQuery):
         await bot.send_message(target, txt, parse_mode="Markdown")
     except Exception as e:
         log.error(f"offer reply: {e}")
-    await query.message.edit_text(query.message.text + f"\n\n✅ {action}", reply_markup=None)
+    try:
+        await query.message.edit_text(query.message.text + f"\n\n✅ {action}", reply_markup=None)
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data.startswith("donate_"))
@@ -1717,7 +1754,7 @@ async def donate_callback(query: CallbackQuery):
     if data == "donate_custom":
         temp_donation_amounts[user_id] = 0
         await query.message.edit_text(
-            f"✏️ Сумма: **0**\n\n",
+            f"✏️ Сумма: **0**",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="➕ +5", callback_data="donate_adj_+5"),
                  InlineKeyboardButton(text="➕ +10", callback_data="donate_adj_+10")],
@@ -1789,6 +1826,10 @@ async def create_invoice(query: CallbackQuery, user_id: int, amount: int):
         await query.message.edit_text(f"❌ Ошибка: {e}")
 
 
+# ============================================================
+# КОЛБЭКИ: КАРТОЧКИ
+# ============================================================
+
 @router.callback_query(F.data.in_({"card_free", "card_premium"}))
 async def card_callback(query: CallbackQuery):
     log.warning("CARD HIT: data=%r user=%s", query.data, query.from_user.id)
@@ -1833,7 +1874,10 @@ async def card_callback(query: CallbackQuery):
                 pass
         except Exception as e:
             log.exception(f"Фото карточки: {e}")
-            await query.message.edit_text(caption + "\n\n⚠️ Фото не отправилось, но карточка сохранена.", parse_mode="Markdown")
+            try:
+                await query.message.edit_text(caption + "\n\n⚠️ Фото не отправилось, но карточка сохранена.", parse_mode="Markdown")
+            except Exception:
+                await bot.send_message(chat_id, caption, parse_mode="Markdown")
     else:
         await query.message.edit_text(caption + "\n\n🖼️ Нет изображения.", parse_mode="Markdown")
     if rarity == "секретная":
@@ -1848,7 +1892,7 @@ async def card_callback(query: CallbackQuery):
 
 
 # ============================================================
-# КАРТОЧКИ (команды)
+# КОМАНДЫ: КАРТОЧКИ
 # ============================================================
 
 @router.message(Command("card"))
@@ -1889,96 +1933,219 @@ async def profile(message: Message):
         text += "\n🃏 **Последние 5:**\n"
         for c in cards[-5:]:
             text += f"{emojis.get(c.get('rarity', 'обычная'), '🃏')} {c.get('name', '?')}\n"
+            text += f"   `{c.get('instance_id', '?')}`\n"
     await message.answer(text, parse_mode="Markdown")
 
+
+@router.message(Command("mycards"))
+async def my_cards(message: Message):
+    user_id = message.from_user.id
+    ud = get_user_card_data(user_id)
+    cards = ud.get("cards", [])
+    if not cards:
+        await message.answer("📭 У тебя нет карточек.")
+        return
+    emojis = {"обычная": "⬜", "редкая": "🟦", "эпическая": "🟪",
+              "мифическая": "🌟", "легендарная": "👑", "секретная": "🔮"}
+    text = f"🃏 **Твои карточки ({len(cards)}):**\n\n"
+    for i, c in enumerate(cards, 1):
+        em = emojis.get(c.get("rarity", "обычная"), "🃏")
+        text += f"{i}. {em} **{c.get('name', '?')}** ({c.get('rarity', '?')})\n"
+        text += f"   `{c.get('instance_id', '?')}`\n\n"
+    if len(text) > 4000:
+        text = text[:4000] + "\n\n... (список длинный, показаны не все)"
+    await message.answer(text, parse_mode="Markdown")
+
+
+# ============================================================
+# АУКЦИОН (с меню выбора карточки)
+# ============================================================
 
 @router.message(Command("ah"))
 @router.message(Command("auction"))
 async def auction(message: Message):
     args = get_args(message)
     user_id = message.from_user.id
+
+    # /ah — список лотов
     if not args:
         a = load_auction()
         if not a:
-            await message.answer("📭 Нет лотов.\n\n`/ah sell <instance_id> <цена>`", parse_mode="Markdown")
+            await message.answer(
+                "📭 На аукционе нет лотов.\n\n"
+                "Чтобы выставить карточку: `/ah sell`",
+                parse_mode="Markdown"
+            )
             return
-        text = "🏷️ **Лоты:**\n\n"
+        text = "🏷️ **Активные лоты:**\n\n"
         for lot_id, lot in list(a.items())[:10]:
-            text += f"• {lot.get('card_name', '?')} — {lot.get('price', 0)} (от {lot.get('seller', '?')})\n  `/ah buy {lot_id}`\n"
+            text += f"• **{lot.get('card_name', '?')}** ({lot.get('rarity', '?')}) — {lot.get('price', 0)} монет\n"
+            text += f"  Продавец: `{lot.get('seller', '?')}` · `/ah buy {lot_id}`\n\n"
         await message.answer(text, parse_mode="Markdown")
         return
+
+    # /ah sell — меню выбора карточки
     if args[0].lower() == "sell":
-        if len(args) < 3:
-            await message.answer("❌ `/ah sell <instance_id> <цена>`", parse_mode="Markdown")
-            return
-        instance_id = args[1]
-        try:
-            price = int(args[2])
-            if price <= 0:
-                raise ValueError
-        except ValueError:
-            await message.answer("❌ Цена > 0!")
-            return
         ud = get_user_card_data(user_id)
-        card_found = next((c for c in ud.get("cards", []) if c.get("instance_id") == instance_id), None)
-        if not card_found:
-            await message.answer("❌ Нет такой карточки!")
+        cards = ud.get("cards", [])
+        if not cards:
+            await message.answer("❌ У тебя нет карточек для продажи!\nОткрой через `/card`.", parse_mode="Markdown")
             return
-        ud["cards"] = [c for c in ud["cards"] if c.get("instance_id") != instance_id]
-        save_user_card_data(user_id, ud)
-        a = load_auction()
-        lot_id = f"lot_{int(time.time()*1000)}_{random.randint(1000,9999)}"
-        a[lot_id] = {
-            "seller": user_id, "card_name": card_found.get("name"),
-            "card_id": card_found.get("card_id"), "rarity": card_found.get("rarity"),
-            "file_id": card_found.get("file_id", ""), "instance_id": instance_id,
-            "price": price, "created": datetime.now().isoformat(),
-        }
-        save_auction(a)
-        await message.answer(f"✅ **{card_found.get('name')}** выставлена за {price}!")
+
+        emojis = {"обычная": "⬜", "редкая": "🟦", "эпическая": "🟪",
+                  "мифическая": "🌟", "легендарная": "👑", "секретная": "🔮"}
+
+        rows = []
+        for c in cards[:30]:
+            em = emojis.get(c.get("rarity", "обычная"), "🃏")
+            name = c.get("name", "?")[:25]
+            rows.append([InlineKeyboardButton(
+                text=f"{em} {name} ({c.get('rarity', '?')})",
+                callback_data=f"sell_pick:{c['instance_id']}"
+            )])
+        rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="sell_cancel")])
+
+        await message.answer(
+            f"🃏 **Выбери карточку для продажи:**\n\nВсего у тебя: {len(cards)}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+            parse_mode="Markdown"
+        )
         return
+
+    # /ah buy <lot_id>
     if args[0].lower() == "buy":
         if len(args) < 2:
-            await message.answer("❌ `/ah buy <lot_id>`", parse_mode="Markdown")
+            await message.answer("❌ Использование: `/ah buy <lot_id>`", parse_mode="Markdown")
             return
         lot_id = args[1]
         a = load_auction()
         lot = a.get(lot_id)
         if not lot:
-            await message.answer("❌ Лот не найден!")
+            await message.answer("❌ Лот не найден или уже продан!")
             return
         seller_id = lot["seller"]
         price = lot["price"]
         if seller_id == user_id:
-            await message.answer("❌ Своя карточка!")
+            await message.answer("❌ Ты не можешь купить свою карточку!")
             return
         if get_user_balance(user_id) < price:
-            await message.answer(f"❌ Нужно {price} монет!")
+            await message.answer(f"❌ Недостаточно монет! Нужно {price}.")
             return
+
         sd = get_user_card_data(seller_id)
         card_to_transfer = next((c for c in sd.get("cards", []) if c.get("instance_id") == lot.get("instance_id")), None)
         if not card_to_transfer:
-            await message.answer("❌ Карточка недоступна!")
+            await message.answer("❌ Карточка больше недоступна. Лот снят.")
             a.pop(lot_id, None)
             save_auction(a)
             return
+
         update_user_balance(user_id, -price)
         update_user_balance(seller_id, price)
+
         sd["cards"] = [c for c in sd["cards"] if c.get("instance_id") != lot.get("instance_id")]
         save_user_card_data(seller_id, sd)
+
         bd = get_user_card_data(user_id)
         bd["cards"].append(card_to_transfer)
         bd["total_cards"] += 1
         save_user_card_data(user_id, bd)
+
         a.pop(lot_id, None)
         save_auction(a)
-        await message.answer(f"✅ Куплено **{lot.get('card_name')}** за {price}!")
+
+        await message.answer(f"✅ Куплено **{lot.get('card_name')}** за {price} монет!", parse_mode="Markdown")
         return
-    await message.answer("❌ `/ah sell` или `/ah buy`", parse_mode="Markdown")
+
+    await message.answer("❌ Используй `/ah`, `/ah sell` или `/ah buy <lot_id>`", parse_mode="Markdown")
+
+
+@router.callback_query(F.data.startswith("sell_pick:"))
+async def sell_pick(query: CallbackQuery):
+    await query.answer()
+    user_id = query.from_user.id
+    instance_id = query.data.split(":", 1)[1]
+
+    ud = get_user_card_data(user_id)
+    card = next((c for c in ud.get("cards", []) if c.get("instance_id") == instance_id), None)
+    if not card:
+        await query.message.edit_text("❌ Карточка не найдена в инвентаре!")
+        return
+
+    pending_sell[user_id] = instance_id
+
+    emojis = {"обычная": "⬜", "редкая": "🟦", "эпическая": "🟪",
+              "мифическая": "🌟", "легендарная": "👑", "секретная": "🔮"}
+    em = emojis.get(card.get("rarity", "обычная"), "🃏")
+
+    await query.message.edit_text(
+        f"{em} **{card['name']}** ({card['rarity']})\n\n"
+        f"💰 Напиши цену в монетах цифрой.\n"
+        f"Например: `100`\n\n"
+        f"Отмена — `/cancel`",
+        parse_mode="Markdown"
+    )
+
+
+@router.callback_query(F.data == "sell_cancel")
+async def sell_cancel_cb(query: CallbackQuery):
+    await query.answer()
+    pending_sell.pop(query.from_user.id, None)
+    await query.message.edit_text("❌ Продажа отменена.")
+
+
+async def handle_sell_price(message: Message):
+    user_id = message.from_user.id
+    instance_id = pending_sell.pop(user_id, None)
+    if not instance_id:
+        return
+
+    text = (message.text or "").strip()
+    if not text.isdigit():
+        await message.answer("❌ Цена должна быть числом! Продажа отменена.")
+        return
+
+    price = int(text)
+    if price <= 0:
+        await message.answer("❌ Цена должна быть больше 0!")
+        return
+    if price > 1_000_000:
+        await message.answer("❌ Слишком большая цена (макс 1 000 000).")
+        return
+
+    ud = get_user_card_data(user_id)
+    card_found = next((c for c in ud.get("cards", []) if c.get("instance_id") == instance_id), None)
+    if not card_found:
+        await message.answer("❌ Карточка уже не в инвентаре.")
+        return
+
+    ud["cards"] = [c for c in ud["cards"] if c.get("instance_id") != instance_id]
+    save_user_card_data(user_id, ud)
+
+    a = load_auction()
+    lot_id = f"lot_{int(time.time()*1000)}_{random.randint(1000,9999)}"
+    a[lot_id] = {
+        "seller": user_id,
+        "card_name": card_found.get("name"),
+        "card_id": card_found.get("card_id"),
+        "rarity": card_found.get("rarity"),
+        "file_id": card_found.get("file_id", ""),
+        "instance_id": instance_id,
+        "price": price,
+        "created": datetime.now().isoformat(),
+    }
+    save_auction(a)
+
+    await message.answer(
+        f"✅ **{card_found.get('name')}** выставлена за **{price}** монет!\n"
+        f"ID лота: `{lot_id}`\n\n"
+        f"Купить может любой: `/ah buy {lot_id}`",
+        parse_mode="Markdown"
+    )
 
 
 # ============================================================
-# АДМИН КАРТОЧКИ
+# АДМИН: КАРТОЧКИ
 # ============================================================
 
 @router.message(Command("listcards"))
@@ -2155,7 +2322,7 @@ async def inline_query(query: InlineQuery):
 
 
 # ============================================================
-# ОПЛАТА (STARS)
+# ОПЛАТА ЗВЁЗДАМИ
 # ============================================================
 
 @router.pre_checkout_query()
@@ -2209,7 +2376,7 @@ async def welcome_new_member(message: Message):
 
 
 # ============================================================
-# ТРИГГЕРЫ И ТЕКСТОВЫЙ РОУТЕР (В КОНЦЕ!)
+# ТРИГГЕРЫ И ТЕКСТОВЫЙ РОУТЕР (В САМОМ НИЗУ!)
 # ============================================================
 
 async def handle_triggers(message: Message):
@@ -2333,13 +2500,15 @@ async def handle_text_router(message: Message):
     key = (message.chat.id, uid)
     if key in pending_cooldown_input:
         return await cd_input(message)
+    if uid in pending_sell:
+        return await handle_sell_price(message)
     if message.text.startswith("/"):
         return
     await handle_triggers(message)
 
 
 # ============================================================
-# ОШИБКИ
+# ОБРАБОТЧИК ОШИБОК
 # ============================================================
 
 async def global_error_handler(event):
@@ -2362,7 +2531,7 @@ def get_user_groups():
 
 
 def run_flask():
-    flask_app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
+    flask_app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False, threaded=True)
 
 
 # ============================================================
