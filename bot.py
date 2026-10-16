@@ -3553,7 +3553,7 @@ async def main():
             await upsert_card_catalog(cid, c["name"], c["rarity"], c["file_id"])
 
     # 3. Миграция JSON → Turso (один раз)
-    await migrate_from_json()
+    #await migrate_from_json()
 
     # 4. Инициализация бота
     bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
