@@ -31,11 +31,12 @@ from gtts import gTTS
 from io import BytesIO
 
 import libsql
+from groq import Groq
 
 # ==================== НАСТРОЙКИ ====================
 TOKEN = os.environ.get("API_TOKEN")
 if not TOKEN:
-    raise ValueError("Переменная API_TOKEN не установлена!")
+    raise ValueError("API_TOKEN не установлен!")
 
 ADMIN_ID = 8371473442
 MINI_APP_URL = "https://jalal-p7p9.onrender.com"
@@ -56,21 +57,19 @@ bot: Bot = None
 TURSO_URL = os.environ.get("TURSO_DATABASE_URL")
 TURSO_TOKEN = os.environ.get("TURSO_AUTH_TOKEN")
 if not TURSO_URL or not TURSO_TOKEN:
-    raise ValueError("Не заданы TURSO_DATABASE_URL или TURSO_AUTH_TOKEN!")
+    raise ValueError("TURSO_DATABASE_URL или TURSO_AUTH_TOKEN не заданы!")
 
 if TURSO_URL.startswith("libsql://"):
     TURSO_URL = TURSO_URL.replace("libsql://", "https://")
-    log.warning("TURSO_DATABASE_URL заменён на https:// (libsql:// блокирует WebSocket)")
 
 log.info("Turso URL: %s", TURSO_URL)
 
 
 def db():
-    """Новое соединение. НЕЛЬЗЯ кэшировать — Turso рвёт неактивные стримы."""
     return libsql.connect(TURSO_URL, auth_token=TURSO_TOKEN)
 
 
-def db_execute(sql: str, params: tuple = ()):
+def db_execute(sql, params=()):
     conn = db()
     try:
         conn.execute(sql, params)
@@ -79,113 +78,52 @@ def db_execute(sql: str, params: tuple = ()):
         conn.close()
 
 
-def db_executemany(sql: str, params_list):
+def db_fetchone(sql, params=()):
     conn = db()
     try:
-        conn.executemany(sql, params_list)
-        conn.commit()
+        return conn.execute(sql, params).fetchone()
     finally:
         conn.close()
 
 
-def db_fetchone(sql: str, params: tuple = ()):
+def db_fetchall(sql, params=()):
     conn = db()
     try:
-        cur = conn.execute(sql, params)
-        return cur.fetchone()
+        return conn.execute(sql, params).fetchall()
     finally:
         conn.close()
 
 
-def db_fetchall(sql: str, params: tuple = ()):
-    conn = db()
-    try:
-        cur = conn.execute(sql, params)
-        return cur.fetchall()
-    finally:
-        conn.close()
-
-
-async def db_execute_async(sql: str, params: tuple = ()):
+async def db_execute_async(sql, params=()):
     return await asyncio.to_thread(db_execute, sql, params)
 
 
-async def db_executemany_async(sql: str, params_list):
-    return await asyncio.to_thread(db_executemany, sql, params_list)
-
-
-async def db_fetchone_async(sql: str, params: tuple = ()):
+async def db_fetchone_async(sql, params=()):
     return await asyncio.to_thread(db_fetchone, sql, params)
 
 
-async def db_fetchall_async(sql: str, params: tuple = ()):
+async def db_fetchall_async(sql, params=()):
     return await asyncio.to_thread(db_fetchall, sql, params)
 
 
 def init_db():
-    """Создаёт все таблицы при старте. Безопасно вызывать повторно."""
-    statements = [
-        """CREATE TABLE IF NOT EXISTS chats (
-            chat_id INTEGER PRIMARY KEY
-        )""",
-        """CREATE TABLE IF NOT EXISTS donations (
-            user_id INTEGER PRIMARY KEY,
-            total INTEGER DEFAULT 0,
-            count INTEGER DEFAULT 0,
-            last TEXT
-        )""",
-        """CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            balance INTEGER DEFAULT 0,
-            total_cards INTEGER DEFAULT 0,
-            first_card INTEGER DEFAULT 0
-        )""",
-        """CREATE TABLE IF NOT EXISTS cards (
-            instance_id TEXT PRIMARY KEY,
-            user_id INTEGER,
-            card_id TEXT,
-            name TEXT,
-            rarity TEXT,
-            file_id TEXT
-        )""",
-        """CREATE INDEX IF NOT EXISTS idx_cards_user ON cards(user_id)""",
-        """CREATE TABLE IF NOT EXISTS auction (
-            lot_id TEXT PRIMARY KEY,
-            seller INTEGER,
-            card_name TEXT,
-            card_id TEXT,
-            rarity TEXT,
-            file_id TEXT,
-            instance_id TEXT,
-            price INTEGER,
-            created TEXT
-        )""",
-        """CREATE TABLE IF NOT EXISTS user_stats (
-            chat_id INTEGER,
-            user_id INTEGER,
-            count INTEGER DEFAULT 0,
-            PRIMARY KEY (chat_id, user_id)
-        )""",
-        """CREATE TABLE IF NOT EXISTS cooldowns (
-            chat_id INTEGER,
-            command TEXT,
-            seconds INTEGER,
-            PRIMARY KEY (chat_id, command)
-        )""",
-        """CREATE TABLE IF NOT EXISTS user_groups (
-            user_id INTEGER,
-            group_id INTEGER,
-            PRIMARY KEY (user_id, group_id)
-        )""",
-        """CREATE TABLE IF NOT EXISTS cards_catalog (
-            card_id TEXT PRIMARY KEY,
-            name TEXT,
-            rarity TEXT,
-            file_id TEXT
-        )""",
+    stmts = [
+        "CREATE TABLE IF NOT EXISTS chats (chat_id INTEGER PRIMARY KEY)",
+        "CREATE TABLE IF NOT EXISTS donations (user_id INTEGER PRIMARY KEY, total INTEGER DEFAULT 0, count INTEGER DEFAULT 0, last TEXT)",
+        "CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, balance INTEGER DEFAULT 0, total_cards INTEGER DEFAULT 0, first_card INTEGER DEFAULT 0)",
+        "CREATE TABLE IF NOT EXISTS cards (instance_id TEXT PRIMARY KEY, user_id INTEGER, card_id TEXT, name TEXT, rarity TEXT, file_id TEXT)",
+        "CREATE INDEX IF NOT EXISTS idx_cards_user ON cards(user_id)",
+        "CREATE TABLE IF NOT EXISTS auction (lot_id TEXT PRIMARY KEY, seller INTEGER, card_name TEXT, card_id TEXT, rarity TEXT, file_id TEXT, instance_id TEXT, price INTEGER, created TEXT)",
+        "CREATE TABLE IF NOT EXISTS user_stats (chat_id INTEGER, user_id INTEGER, count INTEGER DEFAULT 0, PRIMARY KEY (chat_id, user_id))",
+        "CREATE TABLE IF NOT EXISTS cooldowns (chat_id INTEGER, command TEXT, seconds INTEGER, PRIMARY KEY (chat_id, command))",
+        "CREATE TABLE IF NOT EXISTS user_groups (user_id INTEGER, group_id INTEGER, PRIMARY KEY (user_id, group_id))",
+        "CREATE TABLE IF NOT EXISTS cards_catalog (card_id TEXT PRIMARY KEY, name TEXT, rarity TEXT, file_id TEXT)",
+        "CREATE TABLE IF NOT EXISTS ai_chats (chat_id INTEGER PRIMARY KEY, enabled INTEGER DEFAULT 0)",
+        "CREATE TABLE IF NOT EXISTS ai_context (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, role TEXT, content TEXT, created TEXT)",
+        "CREATE INDEX IF NOT EXISTS idx_ai_context_chat ON ai_context(chat_id, id DESC)",
     ]
-    for stmt in statements:
-        db_execute(stmt)
+    for s in stmts:
+        db_execute(s)
     log.info("✅ Turso: таблицы готовы")
 
 
@@ -194,16 +132,15 @@ OFFER_RULES_URL = "https://telegra.ph/Pravila-otpravki-predlozhenij-08-22"
 AUCTION_PAGE_SIZE = 10
 SELL_PAGE_SIZE = 10
 SELL_TO_BOT_PRICES = {
-    "обычная": 10,
-    "редкая": 25,
-    "эпическая": 50,
-    "легендарная": 100,
-    "мифическая": 150,
-    "секретная": 1000,
+    "обычная": 10, "редкая": 25, "эпическая": 50,
+    "легендарная": 100, "мифическая": 150, "секретная": 1000,
 }
 BULK_SELL_RARITIES = ["обычная", "редкая", "эпическая"]
+AI_CHANCE_PERCENT = 10
+AI_COOLDOWN_SECONDS = 30
+AI_CONTEXT_LIMIT = 10
 
-# ==================== СОСТОЯНИЕ В ПАМЯТИ ====================
+# ==================== СОСТОЯНИЕ ====================
 temp_donation_amounts = {}
 pending_broadcast_all = {}
 pending_cooldown_input = {}
@@ -218,6 +155,43 @@ cooldowns_bred = {}
 cooldowns_search = {}
 cooldowns_voice = {}
 chat_cooldowns = {}
+ai_reply_cooldowns = {}
+
+_groq_client = None
+
+
+def get_groq():
+    global _groq_client
+    if _groq_client is None:
+        key = os.environ.get("GROQ_API_KEY", "")
+        if not key:
+            raise RuntimeError("GROQ_API_KEY не задан!")
+        _groq_client = Groq(api_key=key)
+    return _groq_client
+
+
+async def ask_grok(prompt=None, system=None, history=None, max_tokens=1024):
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    if history:
+        messages.extend(history)
+    if prompt:
+        messages.append({"role": "user", "content": prompt})
+
+    def _call():
+        c = get_groq()
+        r = c.chat.completions.create(
+            model="openai/gpt-oss-120b",
+            messages=messages,
+            temperature=0.7,
+            max_completion_tokens=max_tokens,
+            reasoning_effort="low",
+            include_reasoning=False,
+        )
+        return r.choices[0].message.content
+
+    return await asyncio.to_thread(_call)
 
 
 # ==================== УТИЛИТЫ ====================
@@ -237,6 +211,20 @@ def _lot_emoji(rarity):
             "мифическая": "🌟", "легендарная": "👑", "секретная": "🔮"}.get(rarity, "🃏")
 
 
+def roll_rarity(is_premium=False):
+    rarities = ({"обычная": 5, "редкая": 20, "эпическая": 30, "мифическая": 25, "легендарная": 18, "секретная": 2}
+                if is_premium else
+                {"обычная": 40, "редкая": 25, "эпическая": 20, "мифическая": 10, "легендарная": 4, "секретная": 1})
+    total = sum(rarities.values())
+    r = random.randint(1, total)
+    cum = 0
+    for rarity, chance in rarities.items():
+        cum += chance
+        if r <= cum:
+            return rarity
+    return "обычная"
+
+
 # ==================== МОНИТОРИНГ ====================
 def get_system_info():
     uptime_str = str(datetime.now() - START_TIME).split('.')[0]
@@ -248,12 +236,10 @@ def get_system_info():
         ping = "Ошибка"
     cpu = psutil.cpu_percent(interval=1)
     ram = psutil.virtual_memory()
-    return {
-        "uptime": uptime_str, "ping": ping, "cpu": cpu,
-        "ram_used": round(ram.used / (1024**3), 2),
-        "ram_total": round(ram.total / (1024**3), 2),
-        "ram_percent": ram.percent,
-    }
+    return {"uptime": uptime_str, "ping": ping, "cpu": cpu,
+            "ram_used": round(ram.used / (1024**3), 2),
+            "ram_total": round(ram.total / (1024**3), 2),
+            "ram_percent": ram.percent}
 
 
 async def monitor_loop():
@@ -265,26 +251,21 @@ async def monitor_loop():
             ram_s = "🟢" if info["ram_percent"] < 70 else "🟡" if info["ram_percent"] < 90 else "🔴"
             ping_s = "🟢" if info["ping"] != "Ошибка" and info["ping"] < 200 else "🟡" if info["ping"] != "Ошибка" and info["ping"] < 500 else "🔴"
             text = (
-                f"📊 **Статус бота**\n\n"
-                f"⏱ **Аптайм:** {info['uptime']}\n"
-                f"{ping_s} **Пинг:** {info['ping']} мс\n\n"
-                f"💻 **Нагруженность:**\n"
-                f"  {cpu_s} CPU: {info['cpu']}%\n"
-                f"  {ram_s} RAM: {info['ram_used']} ГБ / {info['ram_total']} ГБ ({info['ram_percent']}%)\n\n"
-                f"🕐 Обновлено: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"
+                f"📊 **Статус**\n\n⏱ {info['uptime']}\n"
+                f"{ping_s} Пинг: {info['ping']} мс\n\n"
+                f"{cpu_s} CPU: {info['cpu']}%\n"
+                f"{ram_s} RAM: {info['ram_used']}/{info['ram_total']} ГБ\n\n"
+                f"🕐 {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"
             )
             await bot.send_message(MONITOR_CHAT_ID, text, parse_mode="Markdown")
         except Exception as e:
-            log.error(f"Ошибка мониторинга: {e}")
+            log.error(f"Monitor: {e}")
         await asyncio.sleep(MONITOR_INTERVAL)
 
 
 # ==================== ЧАТЫ ====================
 async def save_chat_id(chat_id):
-    await db_execute_async(
-        "INSERT OR IGNORE INTO chats (chat_id) VALUES (?)",
-        (chat_id,)
-    )
+    await db_execute_async("INSERT OR IGNORE INTO chats (chat_id) VALUES (?)", (chat_id,))
 
 
 async def get_all_chats():
@@ -295,70 +276,53 @@ async def get_all_chats():
 # ==================== ДОНАТЫ ====================
 async def load_donations():
     rows = await db_fetchall_async("SELECT user_id, total, count, last FROM donations")
-    return {
-        str(r[0]): {"total": r[1], "count": r[2], "last": r[3]}
-        for r in rows
-    }
+    return {str(r[0]): {"total": r[1], "count": r[2], "last": r[3]} for r in rows}
 
 
 async def add_donation(user_id, amount):
-    existing = await db_fetchone_async(
-        "SELECT total, count FROM donations WHERE user_id = ?", (user_id,)
-    )
+    existing = await db_fetchone_async("SELECT total, count FROM donations WHERE user_id = ?", (user_id,))
     now = datetime.now().isoformat()
     if existing:
         await db_execute_async(
             "UPDATE donations SET total = ?, count = ?, last = ? WHERE user_id = ?",
-            (existing[0] + amount, existing[1] + 1, now, user_id)
-        )
+            (existing[0] + amount, existing[1] + 1, now, user_id))
     else:
         await db_execute_async(
             "INSERT INTO donations (user_id, total, count, last) VALUES (?, ?, 1, ?)",
-            (user_id, amount, now)
-        )
+            (user_id, amount, now))
 
 
 # ==================== РЕЙТИНГ ====================
 async def add_activity(chat_id, user_id):
     chat_id, user_id = int(chat_id), int(user_id)
     existing = await db_fetchone_async(
-        "SELECT count FROM user_stats WHERE chat_id = ? AND user_id = ?",
-        (chat_id, user_id)
-    )
+        "SELECT count FROM user_stats WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
     if existing:
         await db_execute_async(
             "UPDATE user_stats SET count = count + 1 WHERE chat_id = ? AND user_id = ?",
-            (chat_id, user_id)
-        )
+            (chat_id, user_id))
     else:
         await db_execute_async(
             "INSERT INTO user_stats (chat_id, user_id, count) VALUES (?, ?, 1)",
-            (chat_id, user_id)
-        )
+            (chat_id, user_id))
 
 
 async def get_chat_stats(chat_id):
     rows = await db_fetchall_async(
-        "SELECT user_id, count FROM user_stats WHERE chat_id = ? ORDER BY count DESC LIMIT 10",
-        (chat_id,)
-    )
+        "SELECT user_id, count FROM user_stats WHERE chat_id = ? ORDER BY count DESC LIMIT 10", (chat_id,))
     return {r[0]: r[1] for r in rows}
 
 
 async def get_active_users_in_chat(chat_id, limit=200):
     rows = await db_fetchall_async(
-        "SELECT user_id FROM user_stats WHERE chat_id = ? ORDER BY count DESC LIMIT ?",
-        (chat_id, limit)
-    )
+        "SELECT user_id FROM user_stats WHERE chat_id = ? ORDER BY count DESC LIMIT ?", (chat_id, limit))
     return [r[0] for r in rows]
 
 
 # ==================== КУЛДАУНЫ ====================
 async def get_cd(chat_id, command):
     row = await db_fetchone_async(
-        "SELECT seconds FROM cooldowns WHERE chat_id = ? AND command = ?",
-        (chat_id, command)
-    )
+        "SELECT seconds FROM cooldowns WHERE chat_id = ? AND command = ?", (chat_id, command))
     if row:
         return row[0]
     defaults = {'folk': 60, 'litvin': 60, 'bred': 60, 'search': 600, 'voice': 30}
@@ -368,8 +332,7 @@ async def get_cd(chat_id, command):
 async def set_cd(chat_id, command, seconds):
     await db_execute_async(
         "INSERT OR REPLACE INTO cooldowns (chat_id, command, seconds) VALUES (?, ?, ?)",
-        (chat_id, command, seconds)
-    )
+        (chat_id, command, seconds))
 
 
 def get_cd_dict(command):
@@ -396,14 +359,11 @@ def use_cd(chat_id, user_id, command):
 # ==================== ПОЛЬЗОВАТЕЛИ ====================
 async def get_user(user_id):
     row = await db_fetchone_async(
-        "SELECT user_id, balance, total_cards, first_card FROM users WHERE user_id = ?",
-        (user_id,)
-    )
+        "SELECT user_id, balance, total_cards, first_card FROM users WHERE user_id = ?", (user_id,))
     if not row:
         await db_execute_async(
             "INSERT OR IGNORE INTO users (user_id, balance, total_cards, first_card) VALUES (?, 0, 0, 0)",
-            (user_id,)
-        )
+            (user_id,))
         return {"user_id": user_id, "balance": 0, "total_cards": 0, "first_card": 0}
     return {"user_id": row[0], "balance": row[1], "total_cards": row[2], "first_card": row[3]}
 
@@ -414,90 +374,49 @@ async def get_user_balance(user_id):
 
 
 async def update_user_balance(user_id, amount):
-    await get_user(user_id)  # создаст если нет
-    await db_execute_async(
-        "UPDATE users SET balance = balance + ? WHERE user_id = ?",
-        (amount, user_id)
-    )
+    await get_user(user_id)
+    await db_execute_async("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
     row = await db_fetchone_async("SELECT balance FROM users WHERE user_id = ?", (user_id,))
     return row[0] if row else 0
-
-
-async def set_user_balance(user_id, balance):
-    await get_user(user_id)
-    await db_execute_async(
-        "UPDATE users SET balance = ? WHERE user_id = ?",
-        (balance, user_id)
-    )
 
 
 # ==================== КАРТОЧКИ ====================
 async def get_user_cards(user_id):
     rows = await db_fetchall_async(
-        "SELECT instance_id, card_id, name, rarity, file_id FROM cards WHERE user_id = ?",
-        (user_id,)
-    )
-    return [
-        {"instance_id": r[0], "card_id": r[1], "name": r[2], "rarity": r[3], "file_id": r[4]}
-        for r in rows
-    ]
-
-
-async def get_user_card_count(user_id):
-    row = await db_fetchone_async(
-        "SELECT COUNT(*) FROM cards WHERE user_id = ?", (user_id,)
-    )
-    return row[0] if row else 0
+        "SELECT instance_id, card_id, name, rarity, file_id FROM cards WHERE user_id = ?", (user_id,))
+    return [{"instance_id": r[0], "card_id": r[1], "name": r[2], "rarity": r[3], "file_id": r[4]} for r in rows]
 
 
 async def add_card_to_user(user_id, card_id, card_data):
-    await get_user(user_id)  # создаст юзера
-    instance_id = f"card_{int(time.time()*1000)}_{random.randint(1000,9999)}"
+    await get_user(user_id)
+    iid = f"card_{int(time.time()*1000)}_{random.randint(1000,9999)}"
     await db_execute_async(
         "INSERT INTO cards (instance_id, user_id, card_id, name, rarity, file_id) VALUES (?, ?, ?, ?, ?, ?)",
-        (instance_id, user_id, card_id, card_data["name"], card_data["rarity"], card_data["file_id"])
-    )
-    await db_execute_async(
-        "UPDATE users SET total_cards = total_cards + 1 WHERE user_id = ?",
-        (user_id,)
-    )
-    # Первая карточка = бонус 100 монет
+        (iid, user_id, card_id, card_data["name"], card_data["rarity"], card_data["file_id"]))
+    await db_execute_async("UPDATE users SET total_cards = total_cards + 1 WHERE user_id = ?", (user_id,))
     u = await get_user(user_id)
     if not u["first_card"]:
-        await db_execute_async(
-            "UPDATE users SET first_card = 1, balance = 100 WHERE user_id = ?",
-            (user_id,)
-        )
-    return {
-        "instance_id": instance_id,
-        "card_id": card_id,
-        "name": card_data["name"],
-        "rarity": card_data["rarity"],
-        "file_id": card_data["file_id"],
-    }
+        await db_execute_async("UPDATE users SET first_card = 1, balance = 100 WHERE user_id = ?", (user_id,))
+    return {"instance_id": iid, "card_id": card_id, "name": card_data["name"],
+            "rarity": card_data["rarity"], "file_id": card_data["file_id"]}
 
 
 async def delete_card(instance_id, user_id):
-    """Удаляет карточку. Возвращает True если была удалена."""
     row = await db_fetchone_async(
-        "SELECT instance_id FROM cards WHERE instance_id = ? AND user_id = ?",
-        (instance_id, user_id)
-    )
+        "SELECT instance_id FROM cards WHERE instance_id = ? AND user_id = ?", (instance_id, user_id))
     if not row:
         return False
     await db_execute_async("DELETE FROM cards WHERE instance_id = ?", (instance_id,))
     await db_execute_async(
         "UPDATE users SET total_cards = CASE WHEN total_cards > 0 THEN total_cards - 1 ELSE 0 END WHERE user_id = ?",
-        (user_id,)
-    )
+        (user_id,))
     return True
 
 
 async def get_card_by_instance(instance_id):
     row = await db_fetchone_async(
         "SELECT instance_id, user_id, card_id, name, rarity, file_id FROM cards WHERE instance_id = ?",
-        (instance_id,)
-    )
+        (instance_id,))
     if not row:
         return None
     return {"instance_id": row[0], "user_id": row[1], "card_id": row[2],
@@ -507,15 +426,11 @@ async def get_card_by_instance(instance_id):
 async def get_cards_by_rarity(user_id, rarity):
     rows = await db_fetchall_async(
         "SELECT instance_id, card_id, name, rarity, file_id FROM cards WHERE user_id = ? AND rarity = ?",
-        (user_id, rarity)
-    )
-    return [
-        {"instance_id": r[0], "card_id": r[1], "name": r[2], "rarity": r[3], "file_id": r[4]}
-        for r in rows
-    ]
+        (user_id, rarity))
+    return [{"instance_id": r[0], "card_id": r[1], "name": r[2], "rarity": r[3], "file_id": r[4]} for r in rows]
 
 
-# ==================== КАТАЛОГ КАРТОЧЕК ====================
+# ==================== КАТАЛОГ ====================
 async def get_cards_catalog():
     rows = await db_fetchall_async("SELECT card_id, name, rarity, file_id FROM cards_catalog")
     return {r[0]: {"name": r[1], "rarity": r[2], "file_id": r[3]} for r in rows}
@@ -524,8 +439,7 @@ async def get_cards_catalog():
 async def get_card_by_rarity(rarity):
     row = await db_fetchone_async(
         "SELECT card_id, name, rarity, file_id FROM cards_catalog WHERE rarity = ? ORDER BY RANDOM() LIMIT 1",
-        (rarity,)
-    )
+        (rarity,))
     if not row:
         return None, None
     return row[0], {"name": row[1], "rarity": row[2], "file_id": row[3]}
@@ -534,38 +448,19 @@ async def get_card_by_rarity(rarity):
 async def upsert_card_catalog(card_id, name, rarity, file_id):
     await db_execute_async(
         "INSERT OR REPLACE INTO cards_catalog (card_id, name, rarity, file_id) VALUES (?, ?, ?, ?)",
-        (card_id, name, rarity, file_id)
-    )
+        (card_id, name, rarity, file_id))
 
 
 async def delete_card_catalog(card_id):
     await db_execute_async("DELETE FROM cards_catalog WHERE card_id = ?", (card_id,))
 
 
-def roll_rarity(is_premium=False):
-    rarities = ({"обычная": 5, "редкая": 20, "эпическая": 30, "мифическая": 25, "легендарная": 18, "секретная": 2}
-                if is_premium else
-                {"обычная": 40, "редкая": 25, "эпическая": 20, "мифическая": 10, "легендарная": 4, "секретная": 1})
-    total = sum(rarities.values())
-    r = random.randint(1, total)
-    cum = 0
-    for rarity, chance in rarities.items():
-        cum += chance
-        if r <= cum:
-            return rarity
-    return "обычная"
-
-
 # ==================== АУКЦИОН ====================
 async def load_auction():
     rows = await db_fetchall_async(
-        "SELECT lot_id, seller, card_name, card_id, rarity, file_id, instance_id, price, created FROM auction ORDER BY created DESC"
-    )
-    return {
-        r[0]: {"seller": r[1], "card_name": r[2], "card_id": r[3], "rarity": r[4],
-               "file_id": r[5], "instance_id": r[6], "price": r[7], "created": r[8]}
-        for r in rows
-    }
+        "SELECT lot_id, seller, card_name, card_id, rarity, file_id, instance_id, price, created FROM auction ORDER BY created DESC")
+    return {r[0]: {"seller": r[1], "card_name": r[2], "card_id": r[3], "rarity": r[4],
+                   "file_id": r[5], "instance_id": r[6], "price": r[7], "created": r[8]} for r in rows}
 
 
 async def add_auction_lot(lot_id, seller, card_data, price):
@@ -574,15 +469,13 @@ async def add_auction_lot(lot_id, seller, card_data, price):
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (lot_id, seller, card_data["name"], card_data.get("card_id", ""),
          card_data.get("rarity", "обычная"), card_data.get("file_id", ""),
-         card_data["instance_id"], price, datetime.now().isoformat())
-    )
+         card_data["instance_id"], price, datetime.now().isoformat()))
 
 
 async def get_auction_lot(lot_id):
     row = await db_fetchone_async(
         "SELECT lot_id, seller, card_name, card_id, rarity, file_id, instance_id, price, created FROM auction WHERE lot_id = ?",
-        (lot_id,)
-    )
+        (lot_id,))
     if not row:
         return None
     return {"lot_id": row[0], "seller": row[1], "card_name": row[2], "card_id": row[3],
@@ -593,145 +486,77 @@ async def delete_auction_lot(lot_id):
     await db_execute_async("DELETE FROM auction WHERE lot_id = ?", (lot_id,))
 
 
-# ==================== МИГРАЦИЯ JSON → TURSO ====================
-async def migrate_from_json():
-    """Одноразовый перенос старых JSON-файлов в Turso."""
-    DATA_DIR = "/app/data"
-    marker = f"{DATA_DIR}/.migrated_to_turso"
-    if os.path.exists(marker):
-        return
+# ==================== ИИ ====================
+async def get_ai_chat(chat_id):
+    row = await db_fetchone_async("SELECT enabled FROM ai_chats WHERE chat_id = ?", (chat_id,))
+    if not row:
+        await db_execute_async("INSERT OR IGNORE INTO ai_chats (chat_id, enabled) VALUES (?, 0)", (chat_id,))
+        return {"enabled": 0}
+    return {"enabled": row[0]}
 
-    log.info("🔁 Миграция JSON → Turso...")
 
-    # Чаты
+async def set_ai_enabled(chat_id, enabled):
+    await get_ai_chat(chat_id)
+    await db_execute_async("UPDATE ai_chats SET enabled = ? WHERE chat_id = ?", (enabled, chat_id))
+
+
+async def add_ai_context(chat_id, role, content):
+    await db_execute_async(
+        "INSERT INTO ai_context (chat_id, role, content, created) VALUES (?, ?, ?, ?)",
+        (chat_id, role, content[:500], datetime.now().isoformat()))
+    await db_execute_async(
+        """DELETE FROM ai_context WHERE chat_id = ? AND id NOT IN
+           (SELECT id FROM ai_context WHERE chat_id = ? ORDER BY id DESC LIMIT 20)""",
+        (chat_id, chat_id))
+
+
+async def get_ai_context(chat_id, limit=10):
+    rows = await db_fetchall_async(
+        "SELECT role, content FROM ai_context WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
+        (chat_id, limit))
+    return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
+
+
+# ==================== IMGBB / ПЕРЕВОД / UNSPLASH ====================
+def upload_to_imgbb(image_bytes):
+    url = "https://api.imgbb.com/1/upload"
+    encoded = base64.b64encode(image_bytes).decode('utf-8')
+    payload = {"key": IMGBB_API_KEY, "image": encoded, "name": "meme.jpg", "expiration": 86400}
     try:
-        with open(f"{DATA_DIR}/all_chats.json", "r", encoding="utf-8") as f:
-            chats = json.load(f)
-        for cid in chats:
-            try:
-                await db_execute_async("INSERT OR IGNORE INTO chats (chat_id) VALUES (?)", (cid,))
-            except Exception:
-                pass
-        log.info(f"  ✅ Чаты: {len(chats)}")
-    except FileNotFoundError:
-        pass
+        r = requests.post(url, data=payload, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        return data["data"]["url"] if data.get("success") else None
+    except Exception as e:
+        log.error(f"ImgBB: {e}")
+        return None
 
-    # Донаты
+
+def translate_text(text, target_lang='en'):
     try:
-        with open(f"{DATA_DIR}/donations.json", "r", encoding="utf-8") as f:
-            donations = json.load(f)
-        for uid, d in donations.items():
-            await db_execute_async(
-                "INSERT OR REPLACE INTO donations (user_id, total, count, last) VALUES (?, ?, ?, ?)",
-                (int(uid), d.get("total", 0), d.get("count", 0), d.get("last"))
-            )
-        log.info(f"  ✅ Донаты: {len(donations)}")
-    except FileNotFoundError:
-        pass
+        return GoogleTranslator(source='auto', target=target_lang).translate(text)
+    except Exception as e:
+        log.error(f"Translate: {e}")
+        return text
 
-    # Юзеры и карточки
-    try:
-        with open(f"{DATA_DIR}/user_cards.json", "r", encoding="utf-8") as f:
-            user_cards = json.load(f)
-        for uid, ud in user_cards.items():
-            uid_int = int(uid)
-            await db_execute_async(
-                "INSERT OR REPLACE INTO users (user_id, balance, total_cards, first_card) VALUES (?, ?, ?, ?)",
-                (uid_int, ud.get("balance", 0), ud.get("total_cards", 0), 1 if ud.get("first_card") else 0)
-            )
-            for c in ud.get("cards", []):
-                try:
-                    await db_execute_async(
-                        """INSERT OR IGNORE INTO cards (instance_id, user_id, card_id, name, rarity, file_id)
-                           VALUES (?, ?, ?, ?, ?, ?)""",
-                        (c["instance_id"], uid_int, c.get("card_id", "unknown"),
-                         c.get("name", "?"), c.get("rarity", "обычная"), c.get("file_id", ""))
-                    )
-                except Exception:
-                    pass
-        log.info(f"  ✅ Юзеры: {len(user_cards)}")
-    except FileNotFoundError:
-        pass
 
-    # Аукцион
-    try:
-        with open(f"{DATA_DIR}/auction_lots.json", "r", encoding="utf-8") as f:
-            auction = json.load(f)
-        for lot_id, lot in auction.items():
-            try:
-                await db_execute_async(
-                    """INSERT OR IGNORE INTO auction (lot_id, seller, card_name, card_id, rarity, file_id, instance_id, price, created)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (lot_id, lot.get("seller", 0), lot.get("card_name", "?"),
-                     lot.get("card_id", ""), lot.get("rarity", "обычная"),
-                     lot.get("file_id", ""), lot.get("instance_id", ""),
-                     lot.get("price", 0), lot.get("created", datetime.now().isoformat()))
-                )
-            except Exception:
-                pass
-        log.info(f"  ✅ Лоты: {len(auction)}")
-    except FileNotFoundError:
-        pass
+async def search_unsplash(query, per_page=10):
+    url = "https://api.unsplash.com/search/photos"
+    headers = {"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"}
+    params = {"query": query, "per_page": per_page, "page": 1}
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, headers=headers, params=params) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+                return [item["urls"]["regular"] for item in data.get("results", [])]
+        except Exception as e:
+            log.error(f"Unsplash: {e}")
+            return []
 
-    # Каталог карточек
-    try:
-        with open(f"{DATA_DIR}/cards_data.json", "r", encoding="utf-8") as f:
-            catalog = json.load(f)
-        for cid, c in catalog.items():
-            await db_execute_async(
-                "INSERT OR REPLACE INTO cards_catalog (card_id, name, rarity, file_id) VALUES (?, ?, ?, ?)",
-                (cid, c.get("name", "?"), c.get("rarity", "обычная"), c.get("file_id", ""))
-            )
-        log.info(f"  ✅ Каталог карточек: {len(catalog)}")
-    except FileNotFoundError:
-        pass
 
-    # Статистика (user_stats.json)
-    try:
-        with open(f"{DATA_DIR}/user_stats.json", "r", encoding="utf-8") as f:
-            stats = json.load(f)
-        total = 0
-        for chat_id_str, users in stats.items():
-            chat_id = int(chat_id_str)
-            for uid_str, count in users.items():
-                try:
-                    await db_execute_async(
-                        "INSERT OR REPLACE INTO user_stats (chat_id, user_id, count) VALUES (?, ?, ?)",
-                        (chat_id, int(uid_str), count)
-                    )
-                    total += 1
-                except Exception:
-                    pass
-        log.info(f"  ✅ Статистика: {total}")
-    except FileNotFoundError:
-        pass
-
-    # user_groups.json
-    try:
-        with open(f"{DATA_DIR}/user_groups.json", "r", encoding="utf-8") as f:
-            groups = json.load(f)
-        for uid, gids in groups.items():
-            for gid in gids:
-                try:
-                    await db_execute_async(
-                        "INSERT OR IGNORE INTO user_groups (user_id, group_id) VALUES (?, ?)",
-                        (int(uid), gid)
-                    )
-                except Exception:
-                    pass
-        log.info(f"  ✅ Группы юзеров: {len(groups)}")
-    except FileNotFoundError:
-        pass
-
-    # Ставим маркер — больше не запускаем
-    try:
-        with open(marker, "w") as f:
-            f.write(datetime.now().isoformat())
-    except Exception:
-        pass
-
-    log.info("✅ Миграция завершена")
-# ==================== ВОПРОСЫ ДЛЯ /spin ====================
+# ==================== СПИСКИ ====================
 SPIN_QUESTIONS = [
     "Какая самая странная еда, которую ты пробовал?",
     "Если бы ты мог выбрать суперспособность, которая была бы абсолютно бесполезной — какую бы выбрал?",
@@ -750,7 +575,6 @@ SPIN_QUESTIONS = [
     "Если бы ты мог поменяться жизнью с любым человеком, с кем бы поменялся?",
 ]
 
-# ==================== СЛОВА ДЛЯ /sosat ====================
 RANDOM_WORDS = [
     "кот", "привет", "чайник", "Владимир", "мандарин", "космос", "велосипед",
     "одуванчик", "банан", "дракон", "шлёпа", "мем", "бот", "пельмень",
@@ -759,7 +583,6 @@ RANDOM_WORDS = [
     "огурец", "микрофон", "самокат", "трамвай", "облако", "одуван"
 ]
 
-# ==================== ФАКТЫ ====================
 FACTS = [
     "ты однажды пытался объяснить бабушке, что такое мем — и она до сих пор думает, что это новый вид супа",
     "ты платишь за подписку на музыку, но слушаешь только песни 90-х из своего детства",
@@ -791,175 +614,49 @@ FACTS = [
     "ты проверяешь телефон во время просмотра фильма и перематываешь назад 5 раз",
     "ты считаешь, что у тебя есть суперспособность — находить потерянные вещи, когда они уже не нужны",
     "ты обещаешь себе меньше сидеть в телефоне, но это сообщение — подтверждение обратного",
-    "ты думал, что квартира убирается сама, пока не понял, что это был ты",
-    "ты смотришь тиктоки и смеёшься, даже когда никто не видит",
-    "ты один раз попытался приготовить ужин и с тех пор заказываешь доставку",
-    "ты считаешь, что кофе — это не напиток, а состояние души",
-    "ты включаешь телевизор и засыпаешь под него, а просыпаешься — он всё ещё работает",
-    "ты прячешь сладости от себя и находишь их через неделю",
-    "ты считаешь, что после 23:00 все решения становятся гениальными",
-    "ты нажимаешь 'пропустить рекламу', даже если она тебе интересна",
-    "ты заводишь будильник за час до выхода и всё равно опаздываешь",
-    "ты гуглишь симптомы и находишь у себя все болезни, включая вымышленные",
-    "ты в 3 ночи думаешь о том, что сделал не так 5 лет назад",
-    "ты пересматриваешь старые чаты и понимаешь, что был слишком странным",
-    "ты фотографируешь еду, но не выкладываешь, потому что забыл",
-    "ты отвечаешь 'да, я в курсе', хотя понятия не имеешь, о чём речь",
-    "ты думал, что взрослая жизнь — это свобода, а это просто бесконечные счета",
-    "ты просыпаешься и думаешь: 'сегодня всё изменю', а заканчиваешь день дошираком",
-    "ты считаешь, что твой кот понимает тебя лучше, чем люди",
-    "ты включаешь режим 'не беспокоить', но всё равно проверяешь телефон каждые 5 минут",
-    "ты купил абонемент в спортзал и ходишь туда только за водой",
-    "ты считаешь, что мемы — это искусство, и никто не переубедит тебя",
-    "ты один раз разбил телефон и неделю жил без него — это были лучшие дни",
-    "ты считаешь, что у тебя есть 6-е чувство — чувство, что кто-то смотрит, когда ты ешь",
-    "ты начинаешь уборку с одного угла, а заканчиваешь в другом и уже не помнишь, что делал",
-    "ты считаешь, что инопланетяне уже здесь, и они просто ждут удобного момента",
-    "ты покупаешь книгу и читаешь её, только если она есть в аудиоформате",
-    "ты сохраняешь важные фотографии на телефон и забываешь их там",
-    "ты откладываешь важные дела на 'завтра' уже 3 года",
-    "ты считаешь, что у котиков есть свои мем-шпионы",
-    "ты готовишь настолько сложные ужины, что проще было заказать пиццу",
-    "ты считаешь, что тишина в чате — это признак того, что все заняты мемами",
-    "ты просыпаешься от звука собственных мыслей",
-    "ты уже год обещаешь себе выучить английский, но учишь только мемы на английском",
-    "ты считаешь, что авокадо — это переоценённый овощ, но всё равно его покупаешь",
-    "ты включаешь сериал на фоне и не понимаешь, что происходит, но смотришь до конца",
-    "ты считаешь, что кофе с утра — это ритуал, а не привычка",
-    "ты покупаешь скидочные товары и радуешься, хотя они тебе не нужны",
-    "ты считаешь, что если не ответить на сообщение, то оно исчезнет само",
-    "ты однажды разговаривал с растением и был уверен, что оно понимает",
-    "ты считаешь, что борщ — это не еда, а культура",
-    "ты включаешь музыку, но переключаешь трек, так и не дослушав ни один",
-    "ты считаешь, что в каждом чате есть главный мемологист, и это ты",
-    "ты ищешь вдохновение в ночи, а находишь только пустой холодильник",
-    "ты считаешь, что понедельник — это не день, а проверка на прочность",
-    "ты перечитываешь свои сообщения и удивляешься, зачем ты это написал",
-    "ты считаешь, что зима существует только для того, чтобы укрываться пледом",
-    "ты покупаешь технику и читаешь инструкцию, только если она на русском",
-    "ты считаешь, что смех — это лучшее лекарство, а мемы — его рецепт",
-    "ты однажды приготовил ужин, но забыл его съесть",
-    "ты считаешь, что у каждого есть суперспособность — находить странные видео в 3 ночи",
-    "ты включаешь новогодние фильмы летом, потому что настроение",
-    "ты считаешь, что петрушка — это не трава, а украшение",
-    "ты один раз попытался петь в караоке и с тех пор только слушаешь",
-    "ты считаешь, что носить пижаму целый день — это не лень, а стиль жизни",
-    "ты покупаешь продукты впрок, но они портятся, потому что ты ешь только доширак",
-    "ты считаешь, что дождь — это хороший повод не выходить из дома",
-    "ты собираешь плейлисты, но слушаешь только одно и то же",
-    "ты считаешь, что важные дела можно отложить на понедельник, даже если сегодня вторник",
-    "ты однажды сказал, что будешь писать книгу, и это было 5 лет назад",
-    "ты считаешь, что у твоего кота есть свои планы, в которые ты не посвящён",
-    "ты откладываешь просмотр сериала, чтобы посмотреть его залпом, и так и не начинаешь",
-    "ты считаешь, что чеснок — это защита не только от вампиров, но и от людей",
-    "ты однажды попытался учить программирование, но остановился на 'Hello, World!'",
-    "ты считаешь, что мемы — это единственное, что объединяет поколения",
-    "ты включаешь анимацию и думаешь, что это слишком круто для твоего возраста",
-    "ты считаешь, что магия существует, просто она в мемах",
-    "ты заказываешь еду на дом, потому что лень мыть посуду",
-    "ты считаешь, что ночь — это время для мемов и осознания жизни",
-    "ты покупаешь красивый блокнот, но пишешь там только списки покупок",
-    "ты считаешь, что если песня играет, значит, настроение улучшится",
-    "ты однажды попытался не использовать телефон целый день и сошёл с ума через час",
-    "ты считаешь, что самая сложная задача дня — выбрать, что посмотреть",
-    "ты покупаешь вещь, потому что она на скидке, и никогда её не носишь",
-    "ты считаешь, что есть 2 типа людей: те, кто любит мемы, и те, кто врёт",
-    "ты однажды хотел стать популярным, но понял, что популярность — это слишком сложно",
-    "ты считаешь, что лучший способ решить проблему — это съесть что-то вкусное",
-    "ты пытаешься просыпаться рано уже 3 года — и до сих пор не получается",
-    "ты считаешь, что чипсы — это не просто еда, а состояние души",
-    "ты один раз пытался приготовить торт, и он получился, но есть его было страшно",
-    "ты считаешь, что мемы — это лекарство от скуки",
-    "ты покупаешь абонемент, потому что он выгодный, и ходишь один раз",
-    "ты включаешь прямые эфиры, чтобы чувствовать себя частью чего-то важного",
-    "ты считаешь, что инопланетяне уже смотрят твои мемы и не понимают их",
-    "ты сохраняешь рецепты и забываешь, что они вообще есть",
-    "ты считаешь, что улыбка — это лучший аксессуар",
-    "ты однажды попытался не есть сладкое, и это длилось ровно день",
-    "ты считаешь, что мемы — это универсальный язык, понятный всем",
-    "ты хотел изменить жизнь, но залип в мемах",
-    "ты считаешь, что газировка — это ложь, но всё равно её пьёшь",
-    "ты однажды сказал 'я не буду смеяться', а потом сломался через 2 секунды",
-    "ты считаешь, что у котиков есть свой план по захвату мира",
-    "ты покупаешь одежду, потому что она крутая, и носишь её только дома",
-    "ты считаешь, что на 1 января надо загадывать желания, но всегда забываешь",
-    "ты однажды пытался не скроллить 5 минут и понял, что это невозможно",
-    "ты считаешь, что магия — это когда доширак готовится 3 минуты",
-    "ты покупаешь подписку и забываешь её отменить",
-    "ты считаешь, что мемы — это способ сказать то, что ты не можешь сказать словами",
-    "ты смотришь старые фото и думаешь: 'зачем я это делал?'",
-    "ты считаешь, что человек, который придумал смайлы, должен получить Нобелевскую премию",
-    "ты однажды сказал 'я всё контролирую', а потом уронил телефон",
-    "ты считаешь, что смешные видео лечат лучше любого врача",
-    "ты покупаешь вещи, потому что они красивые, и не знаешь, куда их деть",
-    "ты считаешь, что мемы — это искусство, и ты его ценитель",
-    "ты однажды не выходил из дома целый день и назвал это 'выходным'",
-    "ты считаешь, что ночь — лучшее время для продуктивности, но просто лежишь",
-    "ты думаешь, что стал взрослым, когда начал радоваться новой губке для посуды",
-    "ты считаешь, что если оставишь чат на 5 минут — пропустишь 100 мемов",
-    "ты уже не помнишь, зачем открыл телефон, но мемы листаешь с удовольствием",
-    "ты считаешь, что твой юмор понимают только избранные",
-    "ты говоришь 'я перестану есть по ночам', но заказываешь доставку в 2 часа",
-    "ты считаешь, что сосиска в тесте — это еда для души",
-    "ты переписываешься в чате и смеёшься над собственными мемами",
-    "ты считаешь, что у тебя есть талант — находить странные факты в интернете",
-    "ты однажды попытался сделать утреннюю зарядку и не повторил",
-    "ты считаешь, что если ты смеёшься — значит, всё хорошо",
 ]
 
-# ==================== ЖИВОТНЫЕ ====================
 ANIMALS = [
-    {"name": "Ленивец", "emoji": "🦥", "description": "Ты — ленивец! Твой девиз: «Зачем спешить, если можно не спешить?» Ты мастер ничегонеделания и любишь долго обдумывать даже самые простые решения."},
-    {"name": "Кот", "emoji": "🐱", "description": "Ты — кот! Ты обожаешь внимание, но только когда тебе это нужно. В остальное время ты просто наблюдаешь за миром и иногда позволяешь себя гладить."},
-    {"name": "Собака", "emoji": "🐶", "description": "Ты — собака! Ты преданный друг, который всегда рад видеть всех. Ты любишь гулять, играть и иногда грызть тапки."},
-    {"name": "Пингвин", "emoji": "🐧", "description": "Ты — пингвин! Ты всегда хорошо выглядишь в костюме, идёшь по жизни по-деловому, но внутри ты просто хочешь скользить по льду."},
-    {"name": "Лиса", "emoji": "🦊", "description": "Ты — лиса! Ты умный и хитрый, всегда найдёшь выход из сложной ситуации. Главное — не попасться в капкан."},
-    {"name": "Панда", "emoji": "🐼", "description": "Ты — панда! Ты милый и неуклюжий. Любишь бамбук (и всё остальное) и считаешь, что объедаться — это нормально."},
-    {"name": "Совушка", "emoji": "🦉", "description": "Ты — сова! Ты мудрый и немного загадочный. Любишь ночные посиделки и считаешь себя главным экспертом во всём."},
-    {"name": "Дельфин", "emoji": "🐬", "description": "Ты — дельфин! Весёлый и дружелюбный, ты всегда находишь способ развеселить других. Любишь воду и свободу!"},
-    {"name": "Волк", "emoji": "🐺", "description": "Ты — волк! Ты сильный, независимый и немного загадочный. Ходишь своей тропой и никому не позволяешь вести тебя."},
-    {"name": "Заяц", "emoji": "🐇", "description": "Ты — заяц! Быстрый, пугливый, но очень обаятельный. Ты всегда в движении и часто оказываешься в центре событий."},
-    {"name": "Медведь", "emoji": "🐻", "description": "Ты — медведь! Ты выглядишь грозно, но внутри ты мягкий и добрый. Любишь мёд и долгий зимний сон."},
-    {"name": "Кролик", "emoji": "🐰", "description": "Ты — кролик! Милый, пушистый и обожаешь быть в центре внимания. Твоя самая сильная сторона — очарование."},
-    {"name": "Капибара", "emoji": "🦫", "description": "Ты — капибара! Ты дружишь со всеми, спокоен как удав и всегда готов прийти на помощь. Ты — король чата!"},
-    {"name": "Енот", "emoji": "🦝", "description": "Ты — енот! Ты обожаешь всё блестящее, любишь копаться в мусорках и часто оказываешься в центре хаоса."},
-    {"name": "Жираф", "emoji": "🦒", "description": "Ты — жираф! Ты всегда видишь ситуацию с высоты. Любишь быть в центре внимания и иметь широкий кругозор."},
-    {"name": "Хомяк", "emoji": "🐹", "description": "Ты — хомяк! Ты любишь запасать еду на зиму, а потом забываешь о ней. Милый, пухлый и всегда с щеками!"},
-    {"name": "Тигр", "emoji": "🐅", "description": "Ты — тигр! Ты сильный, грациозный и никого не боишься. Ты идёшь к цели, даже если она на другой стороне джунглей."},
-    {"name": "Обезьяна", "emoji": "🐒", "description": "Ты — обезьяна! Весёлый, энергичный и любишь быть в центре внимания. Ты умеешь поднимать настроение другим."},
-    {"name": "Ёжик", "emoji": "🦔", "description": "Ты — ёжик! Колючий снаружи, но мягкий внутри. Ты заботишься о себе и редко открываешься людям."},
-    {"name": "Корова", "emoji": "🐄", "description": "Ты — корова! Ты добрая, спокойная и всегда готова поделиться теплом. Любишь природу и свежий воздух."},
-    {"name": "Свинья", "emoji": "🐷", "description": "Ты — свинья! Ты ценишь уют, еду и простые радости. Ты всегда знаешь, где найти что-то вкусное."},
-    {"name": "Лягушка", "emoji": "🐸", "description": "Ты — лягушка! Ты прыгаешь от одной идеи к другой, и всегда находишь способ удивить собеседника."},
-    {"name": "Слон", "emoji": "🐘", "description": "Ты — слон! Ты — самый большой и добрый человек в чате. Ты никогда не забываешь обид (и хороших шуток тоже)"},
-    {"name": "Фламинго", "emoji": "🦩", "description": "Ты — фламинго! Ты яркий, стильный и любишь розовые оттенки. Ты всегда в тренде, даже если это просто стояние на одной ноге."},
-    {"name": "Крокодил", "emoji": "🐊", "description": "Ты — крокодил! Ты скрываешь свои эмоции, но внутри ты эмоциональный и иногда пускаешь слезу."},
+    {"name": "Ленивец", "emoji": "🦥", "description": "Ты — ленивец! Твой девиз: «Зачем спешить, если можно не спешить?»"},
+    {"name": "Кот", "emoji": "🐱", "description": "Ты — кот! Ты обожаешь внимание, но только когда тебе это нужно."},
+    {"name": "Собака", "emoji": "🐶", "description": "Ты — собака! Ты преданный друг."},
+    {"name": "Пингвин", "emoji": "🐧", "description": "Ты — пингвин! Хорошо выглядишь в костюме."},
+    {"name": "Лиса", "emoji": "🦊", "description": "Ты — лиса! Умный и хитрый."},
+    {"name": "Панда", "emoji": "🐼", "description": "Ты — панда! Милый и неуклюжий."},
+    {"name": "Совушка", "emoji": "🦉", "description": "Ты — сова! Мудрый и загадочный."},
+    {"name": "Дельфин", "emoji": "🐬", "description": "Ты — дельфин! Весёлый и дружелюбный."},
+    {"name": "Волк", "emoji": "🐺", "description": "Ты — волк! Сильный и независимый."},
+    {"name": "Заяц", "emoji": "🐇", "description": "Ты — заяц! Быстрый и обаятельный."},
+    {"name": "Медведь", "emoji": "🐻", "description": "Ты — медведь! Грозный снаружи, добрый внутри."},
+    {"name": "Кролик", "emoji": "🐰", "description": "Ты — кролик! Милый и пушистый."},
+    {"name": "Капибара", "emoji": "🦫", "description": "Ты — капибара! Дружешь со всеми."},
+    {"name": "Енот", "emoji": "🦝", "description": "Ты — енот! Любишь блестящее."},
+    {"name": "Жираф", "emoji": "🦒", "description": "Ты — жираф! Видишь всё с высоты."},
+    {"name": "Хомяк", "emoji": "🐹", "description": "Ты — хомяк! Запасаешь еду на зиму."},
+    {"name": "Тигр", "emoji": "🐅", "description": "Ты — тигр! Сильный и грациозный."},
+    {"name": "Обезьяна", "emoji": "🐒", "description": "Ты — обезьяна! Весёлый и энергичный."},
+    {"name": "Ёжик", "emoji": "🦔", "description": "Ты — ёжик! Колючий снаружи."},
+    {"name": "Корова", "emoji": "🐄", "description": "Ты — корова! Добрая и спокойная."},
+    {"name": "Свинья", "emoji": "🐷", "description": "Ты — свинья! Ценишь уют."},
+    {"name": "Лягушка", "emoji": "🐸", "description": "Ты — лягушка! Прыгаешь от идеи к идее."},
+    {"name": "Слон", "emoji": "🐘", "description": "Ты — слон! Самый добрый."},
+    {"name": "Фламинго", "emoji": "🦩", "description": "Ты — фламинго! Яркий и стильный."},
+    {"name": "Крокодил", "emoji": "🐊", "description": "Ты — крокодил! Скрываешь эмоции."},
 ]
 
-# ==================== КАТАЛОГ КАРТОЧЕК (для первой миграции) ====================
 DEFAULT_CARDS_CATALOG = {
-    "common_1": {"name": "Атлас", "rarity": "обычная",
-                 "file_id": "AgACAgIAAxkBAAInf2qWul0Ge41cc-qr_grWPmHgtWhNAAKsH2sbFcKwSN8vUM89f1BZAQADAgADeQADPQQ"},
-    "common_2": {"name": "Лысый Атлас", "rarity": "обычная",
-                 "file_id": "AgACAgIAAxkBAAInmGqWyDv-LxsJ5KfarMoXlN0ijBz7AAKKImsbi6m4SJ-2JgTQoZWcAQADAgADeQADPQQ"},
-    "rare_1": {"name": "Кудрявый Атлас", "rarity": "редкая",
-               "file_id": "AgACAgIAAxkBAAInn2qWyUEww97gD1i8ZPSKTK-lkdBlAAKfImsbi6m4SPniHV4q3992AQADAgADeQADPQQ"},
-    "rare_2": {"name": "Проказник", "rarity": "редкая",
-               "file_id": "AgACAgIAAxkBAAIoG2qXBuXziyDulVfs7ONvLwhFVOAmAAIpJGsbi6m4SHsGTJ8d0BS8AQADAgADeAADPQQ"},
-    "epic_1": {"name": "Атлас Мафиози", "rarity": "эпическая",
-               "file_id": "AgACAgIAAxkBAAIoJGqXCDyox3KSUQ65lYsR99KKhnzvAAItJGsbi6m4SAi6CPAL5tCEAQADAgADeAADPQQ"},
-    "epic_2": {"name": "Атлас Мудрец", "rarity": "эпическая",
-               "file_id": "AgACAgIAAxkBAAIoLWqXCUrJ8JWLtemYZjUezwRxqI75AAI1JGsbi6m4SOxGxQPxb07SAQADAgADeQADPQQ"},
-    "mythic_1": {"name": "Атлас Эмо", "rarity": "мифическая",
-                 "file_id": "AgACAgIAAxkBAAIoOWqXC8587-jtnoR2skOlkHvIJRoGAAJAJGsbi6m4SNk7Vco6Q0lKAQADAgADeQADPQQ"},
-    "mythic_2": {"name": "4К Атлас", "rarity": "мифическая",
-                 "file_id": "AgACAgIAAxkBAAIoQGqXD_wj6z3DWGzbrNM90qP-1axxAAJZJGsbi6m4SMOzON2frSMqAQADAgADeQADPQQ"},
-    "legendary_1": {"name": "Атлас Б.", "rarity": "легендарная",
-                    "file_id": "AgACAgIAAxkBAAIoR2qXEQAB3zVKIo88pnXl9Bz9FBBiyQACXyRrG4upuEgbwoClJyOkxAEAAwIAA3kAAz0E"},
+    "common_1": {"name": "Атлас", "rarity": "обычная", "file_id": "AgACAgIAAxkBAAInf2qWul0Ge41cc-qr_grWPmHgtWhNAAKsH2sbFcKwSN8vUM89f1BZAQADAgADeQADPQQ"},
+    "common_2": {"name": "Лысый Атлас", "rarity": "обычная", "file_id": "AgACAgIAAxkBAAInmGqWyDv-LxsJ5KfarMoXlN0ijBz7AAKKImsbi6m4SJ-2JgTQoZWcAQADAgADeQADPQQ"},
+    "rare_1": {"name": "Кудрявый Атлас", "rarity": "редкая", "file_id": "AgACAgIAAxkBAAInn2qWyUEww97gD1i8ZPSKTK-lkdBlAAKfImsbi6m4SPniHV4q3992AQADAgADeQADPQQ"},
+    "rare_2": {"name": "Проказник", "rarity": "редкая", "file_id": "AgACAgIAAxkBAAIoG2qXBuXziyDulVfs7ONvLwhFVOAmAAIpJGsbi6m4SHsGTJ8d0BS8AQADAgADeAADPQQ"},
+    "epic_1": {"name": "Атлас Мафиози", "rarity": "эпическая", "file_id": "AgACAgIAAxkBAAIoJGqXCDyox3KSUQ65lYsR99KKhnzvAAItJGsbi6m4SAi6CPAL5tCEAQADAgADeAADPQQ"},
+    "epic_2": {"name": "Атлас Мудрец", "rarity": "эпическая", "file_id": "AgACAgIAAxkBAAIoLWqXCUrJ8JWLtemYZjUezwRxqI75AAI1JGsbi6m4SOxGxQPxb07SAQADAgADeQADPQQ"},
+    "mythic_1": {"name": "Атлас Эмо", "rarity": "мифическая", "file_id": "AgACAgIAAxkBAAIoOWqXC8587-jtnoR2skOlkHvIJRoGAAJAJGsbi6m4SNk7Vco6Q0lKAQADAgADeQADPQQ"},
+    "mythic_2": {"name": "4К Атлас", "rarity": "мифическая", "file_id": "AgACAgIAAxkBAAIoQGqXD_wj6z3DWGzbrNM90qP-1axxAAJZJGsbi6m4SMOzON2frSMqAQADAgADeQADPQQ"},
+    "legendary_1": {"name": "Атлас Б.", "rarity": "легендарная", "file_id": "AgACAgIAAxkBAAIoR2qXEQAB3zVKIo88pnXl9Bz9FBBiyQACXyRrG4upuEgbwoClJyOkxAEAAwIAA3kAAz0E"},
     "legendary_2": {"name": "Легендарная карточка 2", "rarity": "легендарная", "file_id": "1111111111"},
     "secret_1": {"name": "Секретная карточка", "rarity": "секретная", "file_id": "1111111111"},
-}
-
+    }
 # ==================== СТИКЕРЫ ====================
 ALL_STICKERS = [
     "CAACAgIAAxUAAWokXU38_MuMDT7hhvRuZctYuCKJAALIoAACX-ToSLg5DDhF1X44OwQ",
@@ -1305,57 +1002,11 @@ bred_stickers = [
     "CAACAgIAAxUAAWokZOrG40e6MTW66zTsxm4Z-loOAAJOmAACHOB4SE3Urosl5Hw4OwQ",
 ]
 # ============================================================
-# ИИ: GROQ gpt-oss-120b
+# ИИ-ЛОГИКА (без декоратора, вызывается из handle_text_router)
 # ============================================================
-from groq import Groq
 
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-_groq_client = None
-
-AI_CHANCE_PERCENT = 10
-AI_COOLDOWN_SECONDS = 30
-AI_CONTEXT_LIMIT = 10
-
-ai_reply_cooldowns = {}
-
-
-def get_groq():
-    global _groq_client
-    if _groq_client is None:
-        if not GROQ_API_KEY:
-            raise RuntimeError("GROQ_API_KEY не задан!")
-        _groq_client = Groq(api_key=GROQ_API_KEY)
-    return _groq_client
-
-
-async def ask_grok(prompt: str = None, system: str = None,
-                   history: list = None, max_tokens: int = 1024) -> str:
-    messages = []
-    if system:
-        messages.append({"role": "system", "content": system})
-    if history:
-        messages.extend(history)
-    if prompt:
-        messages.append({"role": "user", "content": prompt})
-
-    def _call():
-        client = get_groq()
-        completion = client.chat.completions.create(
-            model="openai/gpt-oss-120b",
-            messages=messages,
-            temperature=0.7,
-            max_completion_tokens=max_tokens,
-            reasoning_effort="low",
-            include_reasoning=False,
-        )
-        return completion.choices[0].message.content
-
-    return await asyncio.to_thread(_call)
-
-
-@router.message(F.text, ~F.text.startswith("/"))
-async def ai_reply_handler(message: Message):
-    """Отвечает на сообщения в чате если ИИ-режим включён."""
+async def try_ai_reply(message: Message):
+    """Отвечает на сообщения если ИИ-режим включён. Вызывается ИЗ handle_text_router ПОСЛЕДНИМ."""
     chat_id = message.chat.id
     user_id = message.from_user.id if message.from_user else 0
 
@@ -1381,11 +1032,9 @@ async def ai_reply_handler(message: Message):
         and message.reply_to_message.from_user.id == bot.id
     )
 
-    # Кулдаун действует для ВСЕХ сообщений включая реплаи
     now = datetime.now()
     last = ai_reply_cooldowns.get(chat_id)
     cooldown_ok = (not last) or ((now - last).total_seconds() >= AI_COOLDOWN_SECONDS)
-
     if not cooldown_ok:
         return
 
@@ -1410,19 +1059,13 @@ async def ai_reply_handler(message: Message):
 
     try:
         await bot.send_chat_action(chat_id=chat_id, action="typing")
-        answer = await ask_grok(
-            system=system_prompt,
-            history=history,
-            max_tokens=500,
-        )
+        answer = await ask_grok(system=system_prompt, history=history, max_tokens=500)
         answer = answer.strip()
         if len(answer) > 3500:
             answer = answer[:3500] + "..."
-
         await message.reply(answer)
         await add_ai_context(chat_id, "assistant", answer)
         ai_reply_cooldowns[chat_id] = datetime.now()
-
     except Exception as e:
         log.error(f"AI reply error: {e}")
 
@@ -1441,20 +1084,14 @@ async def start(message: Message):
         ])
         await message.answer(
             "👋 Привет! Я бот Folk Valley.\n\n"
-            "🤖 **ИИ:**\n"
-            "• `/ai <вопрос>` — спросить нейросеть\n\n"
-            "🎮 **Игры:**\n"
-            "• `/game` — выбрать игру\n"
-            "• `/answer` — ответ в игре\n"
-            "• `/top` — топ активных\n"
-            "• `/spin` — чат-рулетка (в группах)\n\n"
-            "🐱 **Животные:**\n"
-            "• `/cat`, `/dog`, `/animal`\n\n"
-            "🧠 `/factme` — факт о тебе\n\n"
+            "🤖 `/ai <вопрос>` — спросить нейросеть\n\n"
+            "🎮 `/game`, `/answer`, `/top`, `/spin`\n"
+            "🐱 `/cat`, `/dog`, `/animal`\n"
+            "🧠 `/factme` — факт о тебе\n"
             "🌟 `/donate` — поддержать (в ЛС)\n"
-            "📩 `/offer` — идея админу (в ЛС)\n\n"
-            "🎭 `/folk`, `/litvin`, `/bred`, `/sosat`, `/zabava`, `/search`, `/voice`\n\n"
-            "⚙️ `/cooldown` — кулдауны\n\n"
+            "📩 `/offer` — идея админу (в ЛС)\n"
+            "🎭 `/folk`, `/litvin`, `/bred`, `/sosat`, `/zabava`, `/search`, `/voice`\n"
+            "⚙️ `/cooldown` — кулдауны\n"
             "🃏 `/card`, `/profile`, `/mycards`, `/ah`",
             reply_markup=keyboard,
             parse_mode="Markdown"
@@ -1476,9 +1113,8 @@ async def ai_cmd(message: Message):
             "• `/ai <вопрос>` — разовый вопрос\n"
             "• `/ai on` — включить ИИ-режим (только админ)\n"
             "• `/ai off` — выключить (только админ)\n\n"
-            f"⚙️ ИИ отвечает на ~{AI_CHANCE_PERCENT}% случайных сообщений "
-            f"и всегда — на реплаи боту.\n"
-            f"⏱ Кулдаун между ответами: {AI_COOLDOWN_SECONDS} сек.",
+            f"⚙️ ИИ отвечает на ~{AI_CHANCE_PERCENT}% случайных сообщений.\n"
+            f"⏱ Кулдаун: {AI_COOLDOWN_SECONDS} сек (включая реплаи).",
             parse_mode="Markdown"
         )
         return
@@ -1492,9 +1128,7 @@ async def ai_cmd(message: Message):
         if cmd == "on":
             await set_ai_enabled(chat_id, 1)
             await message.answer(
-                f"✅ ИИ-режим **включён**.\n"
-                f"Отвечаю на ~{AI_CHANCE_PERCENT}% сообщений и на реплаи.\n"
-                f"Кулдаун: {AI_COOLDOWN_SECONDS} сек."
+                f"✅ ИИ-режим **включён**.\n~{AI_CHANCE_PERCENT}% + реплаи. Кулдаун {AI_COOLDOWN_SECONDS} сек."
             )
         else:
             await set_ai_enabled(chat_id, 0)
@@ -1510,10 +1144,7 @@ async def ai_cmd(message: Message):
     try:
         answer = await ask_grok(
             prompt,
-            system=(
-                "Ты — дружелюбный ИИ-ассистент в Telegram-боте Folk Valley. "
-                "Отвечай кратко и по делу, на русском. Максимум 800 символов."
-            ),
+            system="Ты — дружелюбный ИИ-ассистент в Telegram-боте Folk Valley. Отвечай кратко, на русском, макс 800 символов.",
             max_tokens=800,
         )
         if len(answer) > 3500:
@@ -1896,6 +1527,26 @@ async def donate(message: Message):
     await message.answer("🌟 **Поддержи бота звёздами!**", reply_markup=kb, parse_mode="Markdown")
 
 
+@router.message(Command("cancel"))
+async def cancel_cmd(message: Message):
+    uid = message.from_user.id
+    cleared = False
+    if uid in pending_broadcast_all:
+        del pending_broadcast_all[uid]
+        cleared = True
+    if uid in pending_sell:
+        del pending_sell[uid]
+        cleared = True
+    key = (message.chat.id, uid)
+    if key in pending_cooldown_input:
+        del pending_cooldown_input[key]
+        cleared = True
+    if cleared:
+        await message.answer("❌ Отменено.")
+    else:
+        await message.answer("Нечего отменять.")
+
+
 @router.message(Command("chats"))
 async def chats(message: Message):
     if message.from_user.id != ADMIN_ID:
@@ -1987,21 +1638,6 @@ async def donates(message: Message):
             name = f"ID: {uid}"
         result += f"{i}. **{name}** — {data['total']} ({data['count']})\n"
     await message.answer(result, parse_mode="Markdown")
-
-
-@router.message(Command("cancel"))
-async def cancel_cmd(message: Message):
-    uid = message.from_user.id
-    if uid in pending_broadcast_all:
-        del pending_broadcast_all[uid]
-        await message.answer("❌ Отменено.")
-    elif uid in pending_sell:
-        del pending_sell[uid]
-        await message.answer("❌ Продажа отменена.")
-    else:
-        await message.answer("Нечего отменять.")
-
-
 # ============================================================
 # ИГРЫ
 # ============================================================
@@ -2091,7 +1727,7 @@ async def auto_end_game(chat_id):
 
 
 # ============================================================
-# КОЛБЭКИ: ИГРЫ
+# КОЛБЭКИ ИГР
 # ============================================================
 
 @router.callback_query(F.data.startswith("game_start:"))
@@ -2282,7 +1918,7 @@ async def donate_callback(query: CallbackQuery):
         temp_donation_amounts[user_id] = 0
         try:
             await query.message.edit_text(
-                f"✏️ Сумма: **0**",
+                "✏️ Сумма: **0**",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="➕ +5", callback_data="donate_adj_+5"),
                      InlineKeyboardButton(text="➕ +10", callback_data="donate_adj_+10")],
@@ -2400,7 +2036,6 @@ async def card_callback(query: CallbackQuery):
             except TelegramBadRequest:
                 pass
             return
-
     if is_premium:
         balance = await get_user_balance(user_id)
         if balance < 50:
@@ -2409,7 +2044,6 @@ async def card_callback(query: CallbackQuery):
             except TelegramBadRequest:
                 pass
             return
-
     rarity = roll_rarity(is_premium)
     card_id, card_data = await get_card_by_rarity(rarity)
     if not card_data:
@@ -2418,13 +2052,10 @@ async def card_callback(query: CallbackQuery):
         except TelegramBadRequest:
             pass
         return
-
     if is_premium:
         await update_user_balance(user_id, -50)
-
     new_card = await add_card_to_user(user_id, card_id, card_data)
     card_cooldowns[user_id] = now
-
     emojis = {"обычная": "⬜", "редкая": "🟦", "эпическая": "🟪",
               "мифическая": "🌟", "легендарная": "👑", "секретная": "🔮"}
     balance = await get_user_balance(user_id)
@@ -2448,16 +2079,12 @@ async def card_callback(query: CallbackQuery):
             try:
                 await query.message.edit_text(caption + "\n\n⚠️ Фото не отправилось, но карточка сохранена.", parse_mode="Markdown")
             except Exception:
-                try:
-                    await bot.send_message(chat_id, caption, parse_mode="Markdown")
-                except Exception:
-                    pass
+                pass
     else:
         try:
             await query.message.edit_text(caption + "\n\n🖼️ Нет изображения.", parse_mode="Markdown")
         except TelegramBadRequest:
             pass
-
     if rarity == "секретная":
         try:
             user = query.from_user
@@ -2468,10 +2095,6 @@ async def card_callback(query: CallbackQuery):
         except Exception:
             pass
 
-
-# ============================================================
-# КОМАНДЫ: КАРТОЧКИ
-# ============================================================
 
 @router.message(Command("card"))
 async def card(message: Message):
@@ -2531,18 +2154,13 @@ async def my_cards(message: Message):
         text += f"{i}. {em} **{c.get('name', '?')}** ({c.get('rarity', '?')})\n"
         text += f"   `{c.get('instance_id', '?')}`\n\n"
     if len(text) > 4000:
-        text = text[:4000] + "\n\n... (список длинный, показаны не все)"
+        text = text[:4000] + "\n\n... (список длинный)"
     await message.answer(text, parse_mode="Markdown")
 
 
 # ============================================================
 # АУКЦИОН
 # ============================================================
-
-def _lot_emoji(rarity):
-    return {"обычная": "⬜", "редкая": "🟦", "эпическая": "🟪",
-            "мифическая": "🌟", "легендарная": "👑", "секретная": "🔮"}.get(rarity, "🃏")
-
 
 async def _render_auction_page(page: int):
     a = await load_auction()
@@ -2647,7 +2265,6 @@ async def _transfer_lot(buyer_id: int, lot_id: str):
     }
     await update_user_balance(buyer_id, -price)
     await update_user_balance(seller_id, price)
-    # Покупателю карточку — через прямой INSERT (чтобы не путать с add_card_to_user)
     await db_execute_async(
         "INSERT INTO cards (instance_id, user_id, card_id, name, rarity, file_id) VALUES (?, ?, ?, ?, ?, ?)",
         (card["instance_id"], buyer_id, card["card_id"], card["name"], card["rarity"], card["file_id"])
@@ -3199,7 +2816,7 @@ async def give_card(message: Message):
     card_id = args[1]
     catalog = await get_cards_catalog()
     if card_id not in catalog:
-        await message.answer(f"❌ Карточка `{card_id}` не найдена! Смотри `/listcards`", parse_mode="Markdown")
+        await message.answer(f"❌ Карточка `{card_id}` не найдена!", parse_mode="Markdown")
         return
     card_data = catalog[card_id]
     new_card = await add_card_to_user(target_id, card_id, card_data)
@@ -3295,7 +2912,7 @@ async def inline_query(query: InlineQuery):
 
 
 # ============================================================
-# ОПЛАТА ЗВЁЗДАМИ
+# ОПЛАТА
 # ============================================================
 
 @router.pre_checkout_query()
@@ -3458,23 +3075,6 @@ async def cd_input(message: Message):
     await message.answer(f"✅ /{cmd}: {sec}с")
 
 
-@router.message(F.text)
-async def handle_text_router(message: Message):
-    if not message.text:
-        return
-    uid = message.from_user.id
-    if uid == ADMIN_ID and uid in pending_broadcast_all:
-        return await handle_broadcast_all_input(message)
-    key = (message.chat.id, uid)
-    if key in pending_cooldown_input:
-        return await cd_input(message)
-    if uid in pending_sell:
-        return await handle_sell_price(message)
-    if message.text.startswith("/"):
-        return
-    await handle_triggers(message)
-
-
 async def handle_sell_price(message: Message):
     user_id = message.from_user.id
     instance_id = pending_sell.pop(user_id, None)
@@ -3510,11 +3110,59 @@ async def handle_sell_price(message: Message):
 
 
 # ============================================================
+# ТЕКСТОВЫЙ РОУТЕР — КОМАНДЫ ПЕРВЫМИ!
+# ============================================================
+
+@router.message(F.text)
+async def handle_text_router(message: Message):
+    if not message.text:
+        return
+    uid = message.from_user.id
+
+    # 1. КОМАНДЫ — ВСЕГДА ПЕРВЫЕ
+    if message.text.startswith("/"):
+        if message.text.strip().lower() == "/cancel":
+            cleared = False
+            if uid in pending_broadcast_all:
+                del pending_broadcast_all[uid]
+                cleared = True
+            if uid in pending_sell:
+                del pending_sell[uid]
+                cleared = True
+            key = (message.chat.id, uid)
+            if key in pending_cooldown_input:
+                del pending_cooldown_input[key]
+                cleared = True
+            await message.answer("❌ Отменено." if cleared else "Нечего отменять.")
+            return
+        return  # остальные команды обрабатываются своими хэндлерами
+
+    # 2. Ввод текста для рассылки (только админ)
+    if uid == ADMIN_ID and uid in pending_broadcast_all:
+        return await handle_broadcast_all_input(message)
+
+    # 3. Ввод кулдауна
+    key = (message.chat.id, uid)
+    if key in pending_cooldown_input:
+        return await cd_input(message)
+
+    # 4. Ввод цены для продажи
+    if uid in pending_sell:
+        return await handle_sell_price(message)
+
+    # 5. Триггеры
+    await handle_triggers(message)
+
+    # 6. ИИ — только если ничего выше не сработало
+    await try_ai_reply(message)
+
+
+# ============================================================
 # ОБРАБОТЧИК ОШИБОК
 # ============================================================
 
 async def global_error_handler(event):
-    log.error("Ошибка обработчика: %r", event.exception, exc_info=event.exception)
+    log.error("Ошибка: %r", event.exception, exc_info=event.exception)
 
 
 # ============================================================
@@ -3528,7 +3176,7 @@ flask_app = Flask(__name__)
 def get_user_groups():
     uid = request.args.get('user_id', type=str)
     if not uid or not uid.lstrip('-').isdigit():
-        return jsonify({"ok": False, "error": "user_id must be an integer"}), 400
+        return jsonify({"ok": False, "error": "invalid"}), 400
     return jsonify({"ok": True, "result": []})
 
 
@@ -3543,19 +3191,13 @@ def run_flask():
 async def main():
     global bot
 
-    # 1. Инициализация БД
     init_db()
 
-    # 2. Автоматически создаём/проверяем каталог карточек
     existing = await get_cards_catalog()
     for cid, c in DEFAULT_CARDS_CATALOG.items():
         if cid not in existing:
             await upsert_card_catalog(cid, c["name"], c["rarity"], c["file_id"])
 
-    # 3. Миграция JSON → Turso (один раз)
-    #await migrate_from_json()
-
-    # 4. Инициализация бота
     bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     dp.include_router(router)
@@ -3578,3 +3220,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         pass
+        
