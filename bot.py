@@ -11,7 +11,6 @@ import base64
 import aiohttp
 import psutil
 import time
-import shutil
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 
@@ -31,10 +30,12 @@ from deep_translator import GoogleTranslator
 from gtts import gTTS
 from io import BytesIO
 
-# ==================== ТОКЕН ====================
+import libsql
+
+# ==================== НАСТРОЙКИ ====================
 TOKEN = os.environ.get("API_TOKEN")
 if not TOKEN:
-    raise ValueError("Переменная окружения API_TOKEN не установлена!")
+    raise ValueError("Переменная API_TOKEN не установлена!")
 
 ADMIN_ID = 8371473442
 MINI_APP_URL = "https://jalal-p7p9.onrender.com"
@@ -51,34 +52,166 @@ log = logging.getLogger("folkvalley")
 router = Router()
 bot: Bot = None
 
-# ==================== ПУТИ (Bothost: /app/data сохраняется) ====================
-DATA_DIR = "/app/data"
-os.makedirs(DATA_DIR, exist_ok=True)
+# ==================== TURSO ====================
+TURSO_URL = os.environ.get("TURSO_DATABASE_URL")
+TURSO_TOKEN = os.environ.get("TURSO_AUTH_TOKEN")
+if not TURSO_URL or not TURSO_TOKEN:
+    raise ValueError("Не заданы TURSO_DATABASE_URL или TURSO_AUTH_TOKEN!")
 
-CHATS_DB_FILE = f"{DATA_DIR}/all_chats.json"
-DONATIONS_FILE = f"{DATA_DIR}/donations.json"
-USER_STATS_FILE = f"{DATA_DIR}/user_stats.json"
-USER_GROUPS_FILE = f"{DATA_DIR}/user_groups.json"
-CARDS_DATA_FILE = f"{DATA_DIR}/cards_data.json"
-USER_CARDS_FILE = f"{DATA_DIR}/user_cards.json"
-AUCTION_FILE = f"{DATA_DIR}/auction_lots.json"
+if TURSO_URL.startswith("libsql://"):
+    TURSO_URL = TURSO_URL.replace("libsql://", "https://")
+    log.warning("TURSO_DATABASE_URL заменён на https:// (libsql:// блокирует WebSocket)")
 
+log.info("Turso URL: %s", TURSO_URL)
+
+
+def db():
+    """Новое соединение. НЕЛЬЗЯ кэшировать — Turso рвёт неактивные стримы."""
+    return libsql.connect(TURSO_URL, auth_token=TURSO_TOKEN)
+
+
+def db_execute(sql: str, params: tuple = ()):
+    conn = db()
+    try:
+        conn.execute(sql, params)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def db_executemany(sql: str, params_list):
+    conn = db()
+    try:
+        conn.executemany(sql, params_list)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def db_fetchone(sql: str, params: tuple = ()):
+    conn = db()
+    try:
+        cur = conn.execute(sql, params)
+        return cur.fetchone()
+    finally:
+        conn.close()
+
+
+def db_fetchall(sql: str, params: tuple = ()):
+    conn = db()
+    try:
+        cur = conn.execute(sql, params)
+        return cur.fetchall()
+    finally:
+        conn.close()
+
+
+async def db_execute_async(sql: str, params: tuple = ()):
+    return await asyncio.to_thread(db_execute, sql, params)
+
+
+async def db_executemany_async(sql: str, params_list):
+    return await asyncio.to_thread(db_executemany, sql, params_list)
+
+
+async def db_fetchone_async(sql: str, params: tuple = ()):
+    return await asyncio.to_thread(db_fetchone, sql, params)
+
+
+async def db_fetchall_async(sql: str, params: tuple = ()):
+    return await asyncio.to_thread(db_fetchall, sql, params)
+
+
+def init_db():
+    """Создаёт все таблицы при старте. Безопасно вызывать повторно."""
+    statements = [
+        """CREATE TABLE IF NOT EXISTS chats (
+            chat_id INTEGER PRIMARY KEY
+        )""",
+        """CREATE TABLE IF NOT EXISTS donations (
+            user_id INTEGER PRIMARY KEY,
+            total INTEGER DEFAULT 0,
+            count INTEGER DEFAULT 0,
+            last TEXT
+        )""",
+        """CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            balance INTEGER DEFAULT 0,
+            total_cards INTEGER DEFAULT 0,
+            first_card INTEGER DEFAULT 0
+        )""",
+        """CREATE TABLE IF NOT EXISTS cards (
+            instance_id TEXT PRIMARY KEY,
+            user_id INTEGER,
+            card_id TEXT,
+            name TEXT,
+            rarity TEXT,
+            file_id TEXT
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_cards_user ON cards(user_id)""",
+        """CREATE TABLE IF NOT EXISTS auction (
+            lot_id TEXT PRIMARY KEY,
+            seller INTEGER,
+            card_name TEXT,
+            card_id TEXT,
+            rarity TEXT,
+            file_id TEXT,
+            instance_id TEXT,
+            price INTEGER,
+            created TEXT
+        )""",
+        """CREATE TABLE IF NOT EXISTS user_stats (
+            chat_id INTEGER,
+            user_id INTEGER,
+            count INTEGER DEFAULT 0,
+            PRIMARY KEY (chat_id, user_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS cooldowns (
+            chat_id INTEGER,
+            command TEXT,
+            seconds INTEGER,
+            PRIMARY KEY (chat_id, command)
+        )""",
+        """CREATE TABLE IF NOT EXISTS user_groups (
+            user_id INTEGER,
+            group_id INTEGER,
+            PRIMARY KEY (user_id, group_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS cards_catalog (
+            card_id TEXT PRIMARY KEY,
+            name TEXT,
+            rarity TEXT,
+            file_id TEXT
+        )""",
+    ]
+    for stmt in statements:
+        db_execute(stmt)
+    log.info("✅ Turso: таблицы готовы")
+
+
+# ==================== КОНСТАНТЫ ====================
 OFFER_RULES_URL = "https://telegra.ph/Pravila-otpravki-predlozhenij-08-22"
-
-card_cooldowns = {}
 AUCTION_PAGE_SIZE = 10
 SELL_PAGE_SIZE = 10
+SELL_TO_BOT_PRICES = {
+    "обычная": 10,
+    "редкая": 25,
+    "эпическая": 50,
+    "легендарная": 100,
+    "мифическая": 150,
+    "секретная": 1000,
+}
+BULK_SELL_RARITIES = ["обычная", "редкая", "эпическая"]
 
-# ==================== СОСТОЯНИЕ ====================
+# ==================== СОСТОЯНИЕ В ПАМЯТИ ====================
 temp_donation_amounts = {}
 pending_broadcast_all = {}
 pending_cooldown_input = {}
 pending_sell = {}
-user_stats = {}
+bulk_sell_state = {}
 games = {}
 game_timers = {}
-user_groups = {}
-
+card_cooldowns = {}
 cooldowns_folk = {}
 cooldowns_litvin = {}
 cooldowns_bred = {}
@@ -102,24 +235,6 @@ def escape_markdown(text):
 def _lot_emoji(rarity):
     return {"обычная": "⬜", "редкая": "🟦", "эпическая": "🟪",
             "мифическая": "🌟", "легендарная": "👑", "секретная": "🔮"}.get(rarity, "🃏")
-
-
-# ==================== МИГРАЦИЯ ====================
-def migrate_files():
-    """Одноразовый перенос из старой папки /app/shared, если она ещё есть."""
-    os.makedirs(DATA_DIR, exist_ok=True)
-    old_dir = "/app/shared"
-    for filename in ["all_chats.json", "donations.json", "user_stats.json",
-                     "user_groups.json", "cards_data.json", "user_cards.json",
-                     "auction_lots.json"]:
-        src = os.path.join(old_dir, filename)
-        dst = os.path.join(DATA_DIR, filename)
-        if os.path.exists(src) and not os.path.exists(dst):
-            try:
-                shutil.copy2(src, dst)
-                log.info(f"✅ Перенесён {src} -> {dst}")
-            except Exception as e:
-                log.warning(f"⚠️ Не удалось перенести {src}: {e}")
 
 
 # ==================== МОНИТОРИНГ ====================
@@ -165,391 +280,96 @@ async def monitor_loop():
 
 
 # ==================== ЧАТЫ ====================
-def save_chat_id(chat_id):
-    try:
-        with open(CHATS_DB_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        data = []
-    if chat_id not in data:
-        data.append(chat_id)
-        with open(CHATS_DB_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+async def save_chat_id(chat_id):
+    await db_execute_async(
+        "INSERT OR IGNORE INTO chats (chat_id) VALUES (?)",
+        (chat_id,)
+    )
+
+
+async def get_all_chats():
+    rows = await db_fetchall_async("SELECT chat_id FROM chats")
+    return [r[0] for r in rows]
 
 
 # ==================== ДОНАТЫ ====================
-def load_donations():
-    try:
-        with open(DONATIONS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+async def load_donations():
+    rows = await db_fetchall_async("SELECT user_id, total, count, last FROM donations")
+    return {
+        str(r[0]): {"total": r[1], "count": r[2], "last": r[3]}
+        for r in rows
+    }
 
 
-def save_donations(d):
-    with open(DONATIONS_FILE, "w", encoding="utf-8") as f:
-        json.dump(d, f, ensure_ascii=False, indent=2)
-
-
-def add_donation(user_id, amount):
-    d = load_donations()
-    uid = str(user_id)
-    d.setdefault(uid, {"total": 0, "count": 0, "last": None})
-    d[uid]["total"] += amount
-    d[uid]["count"] += 1
-    d[uid]["last"] = datetime.now().isoformat()
-    save_donations(d)
+async def add_donation(user_id, amount):
+    existing = await db_fetchone_async(
+        "SELECT total, count FROM donations WHERE user_id = ?", (user_id,)
+    )
+    now = datetime.now().isoformat()
+    if existing:
+        await db_execute_async(
+            "UPDATE donations SET total = ?, count = ?, last = ? WHERE user_id = ?",
+            (existing[0] + amount, existing[1] + 1, now, user_id)
+        )
+    else:
+        await db_execute_async(
+            "INSERT INTO donations (user_id, total, count, last) VALUES (?, ?, 1, ?)",
+            (user_id, amount, now)
+        )
 
 
 # ==================== РЕЙТИНГ ====================
-def load_stats():
-    global user_stats
-    if os.path.exists(USER_STATS_FILE):
-        try:
-            with open(USER_STATS_FILE, 'r', encoding='utf-8') as f:
-                user_stats = {int(k): {int(u): c for u, c in v.items()} for k, v in json.load(f).items()}
-        except Exception:
-            user_stats = {}
-
-
-def save_stats():
-    try:
-        with open(USER_STATS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(user_stats, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-
-
-def add_activity(chat_id, user_id):
+async def add_activity(chat_id, user_id):
     chat_id, user_id = int(chat_id), int(user_id)
-    user_stats.setdefault(chat_id, {})
-    user_stats[chat_id][user_id] = user_stats[chat_id].get(user_id, 0) + 1
-    save_stats()
-
-
-# ==================== КАРТОЧКИ ====================
-def load_cards_data():
-    default_cards = {
-        "common_1": {"name": "Атлас", "rarity": "обычная",
-                     "file_id": "AgACAgIAAxkBAAInf2qWul0Ge41cc-qr_grWPmHgtWhNAAKsH2sbFcKwSN8vUM89f1BZAQADAgADeQADPQQ"},
-        "common_2": {"name": "Лысый Атлас", "rarity": "обычная",
-                     "file_id": "AgACAgIAAxkBAAInmGqWyDv-LxsJ5KfarMoXlN0ijBz7AAKKImsbi6m4SJ-2JgTQoZWcAQADAgADeQADPQQ"},
-        "rare_1": {"name": "Кудрявый Атлас", "rarity": "редкая",
-                   "file_id": "AgACAgIAAxkBAAInn2qWyUEww97gD1i8ZPSKTK-lkdBlAAKfImsbi6m4SPniHV4q3992AQADAgADeQADPQQ"},
-        "rare_2": {"name": "Проказник", "rarity": "редкая",
-                   "file_id": "AgACAgIAAxkBAAIoG2qXBuXziyDulVfs7ONvLwhFVOAmAAIpJGsbi6m4SHsGTJ8d0BS8AQADAgADeAADPQQ"},
-        "epic_1": {"name": "Атлас Мафиози", "rarity": "эпическая",
-                   "file_id": "AgACAgIAAxkBAAIoJGqXCDyox3KSUQ65lYsR99KKhnzvAAItJGsbi6m4SAi6CPAL5tCEAQADAgADeAADPQQ"},
-        "epic_2": {"name": "Атлас Мудрец", "rarity": "эпическая",
-                   "file_id": "AgACAgIAAxkBAAIoLWqXCUrJ8JWLtemYZjUezwRxqI75AAI1JGsbi6m4SOxGxQPxb07SAQADAgADeQADPQQ"},
-        "mythic_1": {"name": "Атлас Эмо", "rarity": "мифическая",
-                     "file_id": "AgACAgIAAxkBAAIoOWqXC8587-jtnoR2skOlkHvIJRoGAAJAJGsbi6m4SNk7Vco6Q0lKAQADAgADeQADPQQ"},
-        "mythic_2": {"name": "4К Атлас", "rarity": "мифическая",
-                     "file_id": "AgACAgIAAxkBAAIoQGqXD_wj6z3DWGzbrNM90qP-1axxAAJZJGsbi6m4SMOzON2frSMqAQADAgADeQADPQQ"},
-        "legendary_1": {"name": "Атлас Б.", "rarity": "легендарная",
-                        "file_id": "AgACAgIAAxkBAAIoR2qXEQAB3zVKIo88pnXl9Bz9FBBiyQACXyRrG4upuEgbwoClJyOkxAEAAwIAA3kAAz0E"},
-        "legendary_2": {"name": "Легендарная карточка 2", "rarity": "легендарная", "file_id": "1111111111"},
-        "secret_1": {"name": "Секретная карточка", "rarity": "секретная", "file_id": "1111111111"},
-    }
-    try:
-        with open(CARDS_DATA_FILE, "r", encoding="utf-8") as f:
-            cards = json.load(f)
-        if not isinstance(cards, dict):
-            cards = {}
-    except FileNotFoundError:
-        cards = {}
-    except json.JSONDecodeError:
-        log.exception("cards_data.json битый")
-        cards = {}
-    cards.update(default_cards)
-    return cards
-
-
-def save_cards_data(cards):
-    with open(CARDS_DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(cards, f, ensure_ascii=False, indent=2)
-
-
-def load_user_cards():
-    try:
-        with open(USER_CARDS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-
-def save_user_cards(data):
-    with open(USER_CARDS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def load_auction():
-    try:
-        with open(AUCTION_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-
-def save_auction(data):
-    with open(AUCTION_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def get_user_card_data(user_id):
-    data = load_user_cards()
-    uid = str(user_id)
-    if uid not in data:
-        data[uid] = {"cards": [], "balance": 0, "total_cards": 0, "first_card": False}
-        save_user_cards(data)
-    return data[uid]
-
-
-def save_user_card_data(user_id, user_data):
-    data = load_user_cards()
-    data[str(user_id)] = user_data
-    save_user_cards(data)
-
-
-def generate_card_instance_id():
-    return f"card_{int(time.time()*1000)}_{random.randint(1000,9999)}"
-
-
-def roll_rarity(is_premium=False):
-    rarities = ({"обычная": 5, "редкая": 20, "эпическая": 30, "мифическая": 25, "легендарная": 18, "секретная": 2}
-                if is_premium else
-                {"обычная": 40, "редкая": 25, "эпическая": 20, "мифическая": 10, "легендарная": 4, "секретная": 1})
-    total = sum(rarities.values())
-    roll = random.randint(1, total)
-    cum = 0
-    for r, c in rarities.items():
-        cum += c
-        if roll <= cum:
-            return r
-    return "обычная"
-
-
-def get_card_by_rarity(rarity):
-    cards = load_cards_data()
-    available = [cid for cid, c in cards.items() if c["rarity"] == rarity]
-    if not available:
-        return None, None
-    cid = random.choice(available)
-    return cid, cards[cid]
-
-
-def add_card_to_user(user_id, card_id, card_data):
-    ud = get_user_card_data(user_id)
-    new_card = {
-        "instance_id": generate_card_instance_id(),
-        "card_id": card_id,
-        "name": card_data["name"],
-        "rarity": card_data["rarity"],
-        "file_id": card_data["file_id"],
-    }
-    ud["cards"].append(new_card)
-    ud["total_cards"] += 1
-    if not ud.get("first_card", False):
-        ud["first_card"] = True
-        ud["balance"] = 100
-    save_user_card_data(user_id, ud)
-    return new_card
-
-
-def get_user_balance(user_id):
-    return get_user_card_data(user_id).get("balance", 0)
-
-
-def update_user_balance(user_id, amount):
-    ud = get_user_card_data(user_id)
-    ud["balance"] = ud.get("balance", 0) + amount
-    save_user_card_data(user_id, ud)
-    return ud["balance"]
-
-
-# ==================== АУКЦИОН: утилиты рендера ====================
-def render_auction_page(page: int):
-    a = load_auction()
-    if not a:
-        return ("📭 На аукционе пока нет лотов.\n\n"
-                "Открой меню продажи кнопкой ниже.", None)
-
-    lots = list(a.items())
-    total = len(lots)
-    total_pages = max(1, (total + AUCTION_PAGE_SIZE - 1) // AUCTION_PAGE_SIZE)
-    page = max(0, min(page, total_pages - 1))
-    start = page * AUCTION_PAGE_SIZE
-    page_lots = lots[start:start + AUCTION_PAGE_SIZE]
-
-    rows = []
-    for lot_id, lot in page_lots:
-        em = _lot_emoji(lot.get("rarity"))
-        name = (lot.get("card_name") or "?")[:22]
-        price = lot.get("price", 0)
-        rows.append([InlineKeyboardButton(
-            text=f"{em} {name} — {price} 💎",
-            callback_data=f"ah_view:{lot_id}"
-        )])
-
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"ah_page:{page-1}"))
-    nav.append(InlineKeyboardButton(text=f"• {page+1}/{total_pages} •", callback_data="noop"))
-    if page < total_pages - 1:
-        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"ah_page:{page+1}"))
-    if nav:
-        rows.append(nav)
-
-    rows.append([InlineKeyboardButton(text="🃏 Продать свою карточку", callback_data="sell_page:0")])
-
-    text = (
-        f"🏷️ **Аукцион**\n\n"
-        f"📦 Лотов: **{total}**\n"
-        f"📄 Страница {page+1} / {total_pages}"
+    existing = await db_fetchone_async(
+        "SELECT count FROM user_stats WHERE chat_id = ? AND user_id = ?",
+        (chat_id, user_id)
     )
-    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+    if existing:
+        await db_execute_async(
+            "UPDATE user_stats SET count = count + 1 WHERE chat_id = ? AND user_id = ?",
+            (chat_id, user_id)
+        )
+    else:
+        await db_execute_async(
+            "INSERT INTO user_stats (chat_id, user_id, count) VALUES (?, ?, 1)",
+            (chat_id, user_id)
+        )
 
 
-def render_sell_page(user_id: int, page: int):
-    ud = get_user_card_data(user_id)
-    cards = ud.get("cards", [])
-    if not cards:
-        return ("❌ У тебя нет карточек.\nОткрой через `/card`", None)
-
-    total = len(cards)
-    total_pages = max(1, (total + SELL_PAGE_SIZE - 1) // SELL_PAGE_SIZE)
-    page = max(0, min(page, total_pages - 1))
-    start = page * SELL_PAGE_SIZE
-    page_cards = cards[start:start + SELL_PAGE_SIZE]
-
-    rows = []
-    for c in page_cards:
-        em = _lot_emoji(c.get("rarity"))
-        name = (c.get("name") or "?")[:25]
-        rows.append([InlineKeyboardButton(
-            text=f"{em} {name} ({c.get('rarity','?')})",
-            callback_data=f"sell_pick:{c['instance_id']}"
-        )])
-
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"sell_page:{page-1}"))
-    nav.append(InlineKeyboardButton(text=f"• {page+1}/{total_pages} •", callback_data="noop"))
-    if page < total_pages - 1:
-        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"sell_page:{page+1}"))
-    if nav:
-        rows.append(nav)
-
-    rows.append([InlineKeyboardButton(text="🏷️ К аукциону", callback_data="ah_page:0")])
-
-    text = (
-        f"🃏 **Выбери карточку для продажи**\n\n"
-        f"📦 Всего карточек: **{total}**\n"
-        f"📄 Страница {page+1} / {total_pages}"
+async def get_chat_stats(chat_id):
+    rows = await db_fetchall_async(
+        "SELECT user_id, count FROM user_stats WHERE chat_id = ? ORDER BY count DESC LIMIT 10",
+        (chat_id,)
     )
-    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+    return {r[0]: r[1] for r in rows}
 
 
-def _transfer_lot(buyer_id: int, lot_id: str):
-    """Переносит лот к покупателю. НЕ ищет карточку у продавца (её там нет)."""
-    a = load_auction()
-    lot = a.get(lot_id)
-    if not lot:
-        return False, "Лот не найден"
-    seller_id = lot["seller"]
-    price = lot["price"]
-    if seller_id == buyer_id:
-        return False, "Нельзя купить свою карточку"
-    if get_user_balance(buyer_id) < price:
-        return False, "Недостаточно монет"
-
-    # Карточку создаём ИЗ ДАННЫХ ЛОТА — у продавца её нет.
-    card = {
-        "instance_id": lot["instance_id"],
-        "card_id": lot.get("card_id", "unknown"),
-        "name": lot.get("card_name", "Карточка"),
-        "rarity": lot.get("rarity", "обычная"),
-        "file_id": lot.get("file_id", ""),
-    }
-
-    # Деньги
-    update_user_balance(buyer_id, -price)
-    update_user_balance(seller_id, price)
-
-    # Покупателю карточку
-    bd = get_user_card_data(buyer_id)
-    bd["cards"].append(card)
-    bd["total_cards"] += 1
-    save_user_card_data(buyer_id, bd)
-
-    # Лот удаляем
-    a.pop(lot_id, None)
-    save_auction(a)
-    return True, None
-
-
-# ==================== IMGBB / ПЕРЕВОД / UNSPLASH ====================
-def upload_to_imgbb(image_bytes):
-    url = "https://api.imgbb.com/1/upload"
-    encoded = base64.b64encode(image_bytes).decode('utf-8')
-    payload = {"key": IMGBB_API_KEY, "image": encoded, "name": "meme.jpg", "expiration": 86400}
-    try:
-        resp = requests.post(url, data=payload, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        return data["data"]["url"] if data.get("success") else None
-    except Exception as e:
-        log.error(f"ImgBB: {e}")
-        return None
-
-
-def translate_text(text, target_lang='en'):
-    try:
-        return GoogleTranslator(source='auto', target=target_lang).translate(text)
-    except Exception as e:
-        log.error(f"Перевод: {e}")
-        return text
-
-
-async def search_unsplash(query, per_page=10):
-    url = "https://api.unsplash.com/search/photos"
-    headers = {"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"}
-    params = {"query": query, "per_page": per_page, "page": 1}
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url, headers=headers, params=params) as resp:
-                if resp.status != 200:
-                    return []
-                data = await resp.json()
-                return [item["urls"]["regular"] for item in data.get("results", [])]
-        except Exception as e:
-            log.error(f"Unsplash: {e}")
-            return []
+async def get_active_users_in_chat(chat_id, limit=200):
+    rows = await db_fetchall_async(
+        "SELECT user_id FROM user_stats WHERE chat_id = ? ORDER BY count DESC LIMIT ?",
+        (chat_id, limit)
+    )
+    return [r[0] for r in rows]
 
 
 # ==================== КУЛДАУНЫ ====================
-def load_user_groups():
-    global user_groups
-    if os.path.exists(USER_GROUPS_FILE):
-        try:
-            with open(USER_GROUPS_FILE, 'r', encoding='utf-8') as f:
-                user_groups = {int(k): v for k, v in json.load(f).items()}
-        except Exception:
-            user_groups = {}
+async def get_cd(chat_id, command):
+    row = await db_fetchone_async(
+        "SELECT seconds FROM cooldowns WHERE chat_id = ? AND command = ?",
+        (chat_id, command)
+    )
+    if row:
+        return row[0]
+    defaults = {'folk': 60, 'litvin': 60, 'bred': 60, 'search': 600, 'voice': 30}
+    return defaults.get(command, 60 if command != 'search' else 600)
 
 
-def save_user_groups():
-    try:
-        with open(USER_GROUPS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(user_groups, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-
-
-def get_cd(chat_id, command):
-    if chat_id not in chat_cooldowns:
-        chat_cooldowns[chat_id] = {'folk': 60, 'litvin': 60, 'bred': 60, 'search': 600, 'voice': 30}
-    return chat_cooldowns[chat_id].get(command, 60 if command != 'search' else 600)
+async def set_cd(chat_id, command, seconds):
+    await db_execute_async(
+        "INSERT OR REPLACE INTO cooldowns (chat_id, command, seconds) VALUES (?, ?, ?)",
+        (chat_id, command, seconds)
+    )
 
 
 def get_cd_dict(command):
@@ -557,8 +377,8 @@ def get_cd_dict(command):
             'search': cooldowns_search, 'voice': cooldowns_voice}.get(command, {})
 
 
-def check_cd(chat_id, user_id, command):
-    duration = get_cd(chat_id, command)
+async def check_cd(chat_id, user_id, command):
+    duration = await get_cd(chat_id, command)
     if duration == 0:
         return False, None
     cd = get_cd_dict(command)
@@ -573,7 +393,345 @@ def use_cd(chat_id, user_id, command):
     get_cd_dict(command)[(chat_id, user_id)] = datetime.now()
 
 
-# ==================== СПИСКИ ====================
+# ==================== ПОЛЬЗОВАТЕЛИ ====================
+async def get_user(user_id):
+    row = await db_fetchone_async(
+        "SELECT user_id, balance, total_cards, first_card FROM users WHERE user_id = ?",
+        (user_id,)
+    )
+    if not row:
+        await db_execute_async(
+            "INSERT OR IGNORE INTO users (user_id, balance, total_cards, first_card) VALUES (?, 0, 0, 0)",
+            (user_id,)
+        )
+        return {"user_id": user_id, "balance": 0, "total_cards": 0, "first_card": 0}
+    return {"user_id": row[0], "balance": row[1], "total_cards": row[2], "first_card": row[3]}
+
+
+async def get_user_balance(user_id):
+    u = await get_user(user_id)
+    return u["balance"]
+
+
+async def update_user_balance(user_id, amount):
+    await get_user(user_id)  # создаст если нет
+    await db_execute_async(
+        "UPDATE users SET balance = balance + ? WHERE user_id = ?",
+        (amount, user_id)
+    )
+    row = await db_fetchone_async("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+    return row[0] if row else 0
+
+
+async def set_user_balance(user_id, balance):
+    await get_user(user_id)
+    await db_execute_async(
+        "UPDATE users SET balance = ? WHERE user_id = ?",
+        (balance, user_id)
+    )
+
+
+# ==================== КАРТОЧКИ ====================
+async def get_user_cards(user_id):
+    rows = await db_fetchall_async(
+        "SELECT instance_id, card_id, name, rarity, file_id FROM cards WHERE user_id = ?",
+        (user_id,)
+    )
+    return [
+        {"instance_id": r[0], "card_id": r[1], "name": r[2], "rarity": r[3], "file_id": r[4]}
+        for r in rows
+    ]
+
+
+async def get_user_card_count(user_id):
+    row = await db_fetchone_async(
+        "SELECT COUNT(*) FROM cards WHERE user_id = ?", (user_id,)
+    )
+    return row[0] if row else 0
+
+
+async def add_card_to_user(user_id, card_id, card_data):
+    await get_user(user_id)  # создаст юзера
+    instance_id = f"card_{int(time.time()*1000)}_{random.randint(1000,9999)}"
+    await db_execute_async(
+        "INSERT INTO cards (instance_id, user_id, card_id, name, rarity, file_id) VALUES (?, ?, ?, ?, ?, ?)",
+        (instance_id, user_id, card_id, card_data["name"], card_data["rarity"], card_data["file_id"])
+    )
+    await db_execute_async(
+        "UPDATE users SET total_cards = total_cards + 1 WHERE user_id = ?",
+        (user_id,)
+    )
+    # Первая карточка = бонус 100 монет
+    u = await get_user(user_id)
+    if not u["first_card"]:
+        await db_execute_async(
+            "UPDATE users SET first_card = 1, balance = 100 WHERE user_id = ?",
+            (user_id,)
+        )
+    return {
+        "instance_id": instance_id,
+        "card_id": card_id,
+        "name": card_data["name"],
+        "rarity": card_data["rarity"],
+        "file_id": card_data["file_id"],
+    }
+
+
+async def delete_card(instance_id, user_id):
+    """Удаляет карточку. Возвращает True если была удалена."""
+    row = await db_fetchone_async(
+        "SELECT instance_id FROM cards WHERE instance_id = ? AND user_id = ?",
+        (instance_id, user_id)
+    )
+    if not row:
+        return False
+    await db_execute_async("DELETE FROM cards WHERE instance_id = ?", (instance_id,))
+    await db_execute_async(
+        "UPDATE users SET total_cards = CASE WHEN total_cards > 0 THEN total_cards - 1 ELSE 0 END WHERE user_id = ?",
+        (user_id,)
+    )
+    return True
+
+
+async def get_card_by_instance(instance_id):
+    row = await db_fetchone_async(
+        "SELECT instance_id, user_id, card_id, name, rarity, file_id FROM cards WHERE instance_id = ?",
+        (instance_id,)
+    )
+    if not row:
+        return None
+    return {"instance_id": row[0], "user_id": row[1], "card_id": row[2],
+            "name": row[3], "rarity": row[4], "file_id": row[5]}
+
+
+async def get_cards_by_rarity(user_id, rarity):
+    rows = await db_fetchall_async(
+        "SELECT instance_id, card_id, name, rarity, file_id FROM cards WHERE user_id = ? AND rarity = ?",
+        (user_id, rarity)
+    )
+    return [
+        {"instance_id": r[0], "card_id": r[1], "name": r[2], "rarity": r[3], "file_id": r[4]}
+        for r in rows
+    ]
+
+
+# ==================== КАТАЛОГ КАРТОЧЕК ====================
+async def get_cards_catalog():
+    rows = await db_fetchall_async("SELECT card_id, name, rarity, file_id FROM cards_catalog")
+    return {r[0]: {"name": r[1], "rarity": r[2], "file_id": r[3]} for r in rows}
+
+
+async def get_card_by_rarity(rarity):
+    row = await db_fetchone_async(
+        "SELECT card_id, name, rarity, file_id FROM cards_catalog WHERE rarity = ? ORDER BY RANDOM() LIMIT 1",
+        (rarity,)
+    )
+    if not row:
+        return None, None
+    return row[0], {"name": row[1], "rarity": row[2], "file_id": row[3]}
+
+
+async def upsert_card_catalog(card_id, name, rarity, file_id):
+    await db_execute_async(
+        "INSERT OR REPLACE INTO cards_catalog (card_id, name, rarity, file_id) VALUES (?, ?, ?, ?)",
+        (card_id, name, rarity, file_id)
+    )
+
+
+async def delete_card_catalog(card_id):
+    await db_execute_async("DELETE FROM cards_catalog WHERE card_id = ?", (card_id,))
+
+
+def roll_rarity(is_premium=False):
+    rarities = ({"обычная": 5, "редкая": 20, "эпическая": 30, "мифическая": 25, "легендарная": 18, "секретная": 2}
+                if is_premium else
+                {"обычная": 40, "редкая": 25, "эпическая": 20, "мифическая": 10, "легендарная": 4, "секретная": 1})
+    total = sum(rarities.values())
+    r = random.randint(1, total)
+    cum = 0
+    for rarity, chance in rarities.items():
+        cum += chance
+        if r <= cum:
+            return rarity
+    return "обычная"
+
+
+# ==================== АУКЦИОН ====================
+async def load_auction():
+    rows = await db_fetchall_async(
+        "SELECT lot_id, seller, card_name, card_id, rarity, file_id, instance_id, price, created FROM auction ORDER BY created DESC"
+    )
+    return {
+        r[0]: {"seller": r[1], "card_name": r[2], "card_id": r[3], "rarity": r[4],
+               "file_id": r[5], "instance_id": r[6], "price": r[7], "created": r[8]}
+        for r in rows
+    }
+
+
+async def add_auction_lot(lot_id, seller, card_data, price):
+    await db_execute_async(
+        """INSERT INTO auction (lot_id, seller, card_name, card_id, rarity, file_id, instance_id, price, created)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (lot_id, seller, card_data["name"], card_data.get("card_id", ""),
+         card_data.get("rarity", "обычная"), card_data.get("file_id", ""),
+         card_data["instance_id"], price, datetime.now().isoformat())
+    )
+
+
+async def get_auction_lot(lot_id):
+    row = await db_fetchone_async(
+        "SELECT lot_id, seller, card_name, card_id, rarity, file_id, instance_id, price, created FROM auction WHERE lot_id = ?",
+        (lot_id,)
+    )
+    if not row:
+        return None
+    return {"lot_id": row[0], "seller": row[1], "card_name": row[2], "card_id": row[3],
+            "rarity": row[4], "file_id": row[5], "instance_id": row[6], "price": row[7], "created": row[8]}
+
+
+async def delete_auction_lot(lot_id):
+    await db_execute_async("DELETE FROM auction WHERE lot_id = ?", (lot_id,))
+
+
+# ==================== МИГРАЦИЯ JSON → TURSO ====================
+async def migrate_from_json():
+    """Одноразовый перенос старых JSON-файлов в Turso."""
+    DATA_DIR = "/app/data"
+    marker = f"{DATA_DIR}/.migrated_to_turso"
+    if os.path.exists(marker):
+        return
+
+    log.info("🔁 Миграция JSON → Turso...")
+
+    # Чаты
+    try:
+        with open(f"{DATA_DIR}/all_chats.json", "r", encoding="utf-8") as f:
+            chats = json.load(f)
+        for cid in chats:
+            try:
+                await db_execute_async("INSERT OR IGNORE INTO chats (chat_id) VALUES (?)", (cid,))
+            except Exception:
+                pass
+        log.info(f"  ✅ Чаты: {len(chats)}")
+    except FileNotFoundError:
+        pass
+
+    # Донаты
+    try:
+        with open(f"{DATA_DIR}/donations.json", "r", encoding="utf-8") as f:
+            donations = json.load(f)
+        for uid, d in donations.items():
+            await db_execute_async(
+                "INSERT OR REPLACE INTO donations (user_id, total, count, last) VALUES (?, ?, ?, ?)",
+                (int(uid), d.get("total", 0), d.get("count", 0), d.get("last"))
+            )
+        log.info(f"  ✅ Донаты: {len(donations)}")
+    except FileNotFoundError:
+        pass
+
+    # Юзеры и карточки
+    try:
+        with open(f"{DATA_DIR}/user_cards.json", "r", encoding="utf-8") as f:
+            user_cards = json.load(f)
+        for uid, ud in user_cards.items():
+            uid_int = int(uid)
+            await db_execute_async(
+                "INSERT OR REPLACE INTO users (user_id, balance, total_cards, first_card) VALUES (?, ?, ?, ?)",
+                (uid_int, ud.get("balance", 0), ud.get("total_cards", 0), 1 if ud.get("first_card") else 0)
+            )
+            for c in ud.get("cards", []):
+                try:
+                    await db_execute_async(
+                        """INSERT OR IGNORE INTO cards (instance_id, user_id, card_id, name, rarity, file_id)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (c["instance_id"], uid_int, c.get("card_id", "unknown"),
+                         c.get("name", "?"), c.get("rarity", "обычная"), c.get("file_id", ""))
+                    )
+                except Exception:
+                    pass
+        log.info(f"  ✅ Юзеры: {len(user_cards)}")
+    except FileNotFoundError:
+        pass
+
+    # Аукцион
+    try:
+        with open(f"{DATA_DIR}/auction_lots.json", "r", encoding="utf-8") as f:
+            auction = json.load(f)
+        for lot_id, lot in auction.items():
+            try:
+                await db_execute_async(
+                    """INSERT OR IGNORE INTO auction (lot_id, seller, card_name, card_id, rarity, file_id, instance_id, price, created)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (lot_id, lot.get("seller", 0), lot.get("card_name", "?"),
+                     lot.get("card_id", ""), lot.get("rarity", "обычная"),
+                     lot.get("file_id", ""), lot.get("instance_id", ""),
+                     lot.get("price", 0), lot.get("created", datetime.now().isoformat()))
+                )
+            except Exception:
+                pass
+        log.info(f"  ✅ Лоты: {len(auction)}")
+    except FileNotFoundError:
+        pass
+
+    # Каталог карточек
+    try:
+        with open(f"{DATA_DIR}/cards_data.json", "r", encoding="utf-8") as f:
+            catalog = json.load(f)
+        for cid, c in catalog.items():
+            await db_execute_async(
+                "INSERT OR REPLACE INTO cards_catalog (card_id, name, rarity, file_id) VALUES (?, ?, ?, ?)",
+                (cid, c.get("name", "?"), c.get("rarity", "обычная"), c.get("file_id", ""))
+            )
+        log.info(f"  ✅ Каталог карточек: {len(catalog)}")
+    except FileNotFoundError:
+        pass
+
+    # Статистика (user_stats.json)
+    try:
+        with open(f"{DATA_DIR}/user_stats.json", "r", encoding="utf-8") as f:
+            stats = json.load(f)
+        total = 0
+        for chat_id_str, users in stats.items():
+            chat_id = int(chat_id_str)
+            for uid_str, count in users.items():
+                try:
+                    await db_execute_async(
+                        "INSERT OR REPLACE INTO user_stats (chat_id, user_id, count) VALUES (?, ?, ?)",
+                        (chat_id, int(uid_str), count)
+                    )
+                    total += 1
+                except Exception:
+                    pass
+        log.info(f"  ✅ Статистика: {total}")
+    except FileNotFoundError:
+        pass
+
+    # user_groups.json
+    try:
+        with open(f"{DATA_DIR}/user_groups.json", "r", encoding="utf-8") as f:
+            groups = json.load(f)
+        for uid, gids in groups.items():
+            for gid in gids:
+                try:
+                    await db_execute_async(
+                        "INSERT OR IGNORE INTO user_groups (user_id, group_id) VALUES (?, ?)",
+                        (int(uid), gid)
+                    )
+                except Exception:
+                    pass
+        log.info(f"  ✅ Группы юзеров: {len(groups)}")
+    except FileNotFoundError:
+        pass
+
+    # Ставим маркер — больше не запускаем
+    try:
+        with open(marker, "w") as f:
+            f.write(datetime.now().isoformat())
+    except Exception:
+        pass
+
+    log.info("✅ Миграция завершена")
+# ==================== ВОПРОСЫ ДЛЯ /spin ====================
 SPIN_QUESTIONS = [
     "Какая самая странная еда, которую ты пробовал?",
     "Если бы ты мог выбрать суперспособность, которая была бы абсолютно бесполезной — какую бы выбрал?",
@@ -592,6 +750,7 @@ SPIN_QUESTIONS = [
     "Если бы ты мог поменяться жизнью с любым человеком, с кем бы поменялся?",
 ]
 
+# ==================== СЛОВА ДЛЯ /sosat ====================
 RANDOM_WORDS = [
     "кот", "привет", "чайник", "Владимир", "мандарин", "космос", "велосипед",
     "одуванчик", "банан", "дракон", "шлёпа", "мем", "бот", "пельмень",
@@ -600,6 +759,7 @@ RANDOM_WORDS = [
     "огурец", "микрофон", "самокат", "трамвай", "облако", "одуван"
 ]
 
+# ==================== ФАКТЫ ====================
 FACTS = [
     "ты однажды пытался объяснить бабушке, что такое мем — и она до сих пор думает, что это новый вид супа",
     "ты платишь за подписку на музыку, но слушаешь только песни 90-х из своего детства",
@@ -747,6 +907,7 @@ FACTS = [
     "ты считаешь, что если ты смеёшься — значит, всё хорошо",
 ]
 
+# ==================== ЖИВОТНЫЕ ====================
 ANIMALS = [
     {"name": "Ленивец", "emoji": "🦥", "description": "Ты — ленивец! Твой девиз: «Зачем спешить, если можно не спешить?» Ты мастер ничегонеделания и любишь долго обдумывать даже самые простые решения."},
     {"name": "Кот", "emoji": "🐱", "description": "Ты — кот! Ты обожаешь внимание, но только когда тебе это нужно. В остальное время ты просто наблюдаешь за миром и иногда позволяешь себя гладить."},
@@ -773,7 +934,31 @@ ANIMALS = [
     {"name": "Слон", "emoji": "🐘", "description": "Ты — слон! Ты — самый большой и добрый человек в чате. Ты никогда не забываешь обид (и хороших шуток тоже)"},
     {"name": "Фламинго", "emoji": "🦩", "description": "Ты — фламинго! Ты яркий, стильный и любишь розовые оттенки. Ты всегда в тренде, даже если это просто стояние на одной ноге."},
     {"name": "Крокодил", "emoji": "🐊", "description": "Ты — крокодил! Ты скрываешь свои эмоции, но внутри ты эмоциональный и иногда пускаешь слезу."},
-    ]
+]
+
+# ==================== КАТАЛОГ КАРТОЧЕК (для первой миграции) ====================
+DEFAULT_CARDS_CATALOG = {
+    "common_1": {"name": "Атлас", "rarity": "обычная",
+                 "file_id": "AgACAgIAAxkBAAInf2qWul0Ge41cc-qr_grWPmHgtWhNAAKsH2sbFcKwSN8vUM89f1BZAQADAgADeQADPQQ"},
+    "common_2": {"name": "Лысый Атлас", "rarity": "обычная",
+                 "file_id": "AgACAgIAAxkBAAInmGqWyDv-LxsJ5KfarMoXlN0ijBz7AAKKImsbi6m4SJ-2JgTQoZWcAQADAgADeQADPQQ"},
+    "rare_1": {"name": "Кудрявый Атлас", "rarity": "редкая",
+               "file_id": "AgACAgIAAxkBAAInn2qWyUEww97gD1i8ZPSKTK-lkdBlAAKfImsbi6m4SPniHV4q3992AQADAgADeQADPQQ"},
+    "rare_2": {"name": "Проказник", "rarity": "редкая",
+               "file_id": "AgACAgIAAxkBAAIoG2qXBuXziyDulVfs7ONvLwhFVOAmAAIpJGsbi6m4SHsGTJ8d0BS8AQADAgADeAADPQQ"},
+    "epic_1": {"name": "Атлас Мафиози", "rarity": "эпическая",
+               "file_id": "AgACAgIAAxkBAAIoJGqXCDyox3KSUQ65lYsR99KKhnzvAAItJGsbi6m4SAi6CPAL5tCEAQADAgADeAADPQQ"},
+    "epic_2": {"name": "Атлас Мудрец", "rarity": "эпическая",
+               "file_id": "AgACAgIAAxkBAAIoLWqXCUrJ8JWLtemYZjUezwRxqI75AAI1JGsbi6m4SOxGxQPxb07SAQADAgADeQADPQQ"},
+    "mythic_1": {"name": "Атлас Эмо", "rarity": "мифическая",
+                 "file_id": "AgACAgIAAxkBAAIoOWqXC8587-jtnoR2skOlkHvIJRoGAAJAJGsbi6m4SNk7Vco6Q0lKAQADAgADeQADPQQ"},
+    "mythic_2": {"name": "4К Атлас", "rarity": "мифическая",
+                 "file_id": "AgACAgIAAxkBAAIoQGqXD_wj6z3DWGzbrNM90qP-1axxAAJZJGsbi6m4SMOzON2frSMqAQADAgADeQADPQQ"},
+    "legendary_1": {"name": "Атлас Б.", "rarity": "легендарная",
+                    "file_id": "AgACAgIAAxkBAAIoR2qXEQAB3zVKIo88pnXl9Bz9FBBiyQACXyRrG4upuEgbwoClJyOkxAEAAwIAA3kAAz0E"},
+    "legendary_2": {"name": "Легендарная карточка 2", "rarity": "легендарная", "file_id": "1111111111"},
+    "secret_1": {"name": "Секретная карточка", "rarity": "секретная", "file_id": "1111111111"},
+}
 
 # ==================== СТИКЕРЫ ====================
 ALL_STICKERS = [
@@ -1119,6 +1304,128 @@ bred_stickers = [
     "CAACAgIAAxUAAWokZOqiAXiA3711Q_TyiPhyFzALAALakwACwD55SBox3domPjGROwQ",
     "CAACAgIAAxUAAWokZOrG40e6MTW66zTsxm4Z-loOAAJOmAACHOB4SE3Urosl5Hw4OwQ",
 ]
+# ============================================================
+# ИИ: GROQ gpt-oss-120b
+# ============================================================
+from groq import Groq
+
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+_groq_client = None
+
+AI_CHANCE_PERCENT = 10
+AI_COOLDOWN_SECONDS = 30
+AI_CONTEXT_LIMIT = 10
+
+ai_reply_cooldowns = {}
+
+
+def get_groq():
+    global _groq_client
+    if _groq_client is None:
+        if not GROQ_API_KEY:
+            raise RuntimeError("GROQ_API_KEY не задан!")
+        _groq_client = Groq(api_key=GROQ_API_KEY)
+    return _groq_client
+
+
+async def ask_grok(prompt: str = None, system: str = None,
+                   history: list = None, max_tokens: int = 1024) -> str:
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    if history:
+        messages.extend(history)
+    if prompt:
+        messages.append({"role": "user", "content": prompt})
+
+    def _call():
+        client = get_groq()
+        completion = client.chat.completions.create(
+            model="openai/gpt-oss-120b",
+            messages=messages,
+            temperature=0.7,
+            max_completion_tokens=max_tokens,
+            reasoning_effort="low",
+            include_reasoning=False,
+        )
+        return completion.choices[0].message.content
+
+    return await asyncio.to_thread(_call)
+
+
+@router.message(F.text, ~F.text.startswith("/"))
+async def ai_reply_handler(message: Message):
+    """Отвечает на сообщения в чате если ИИ-режим включён."""
+    chat_id = message.chat.id
+    user_id = message.from_user.id if message.from_user else 0
+
+    if not user_id or user_id == bot.id:
+        return
+
+    try:
+        cfg = await get_ai_chat(chat_id)
+    except Exception as e:
+        log.error(f"ai_chat lookup: {e}")
+        return
+
+    if not cfg["enabled"]:
+        return
+
+    text = (message.text or "").strip()
+    if not text or len(text) > 1000:
+        return
+
+    is_reply_to_bot = (
+        message.reply_to_message
+        and message.reply_to_message.from_user
+        and message.reply_to_message.from_user.id == bot.id
+    )
+
+    # Кулдаун действует для ВСЕХ сообщений включая реплаи
+    now = datetime.now()
+    last = ai_reply_cooldowns.get(chat_id)
+    cooldown_ok = (not last) or ((now - last).total_seconds() >= AI_COOLDOWN_SECONDS)
+
+    if not cooldown_ok:
+        return
+
+    should_reply = False
+    if is_reply_to_bot:
+        should_reply = True
+    elif random.randint(1, 100) <= AI_CHANCE_PERCENT:
+        should_reply = True
+
+    if not should_reply:
+        return
+
+    await add_ai_context(chat_id, "user", text)
+    history = await get_ai_context(chat_id, limit=AI_CONTEXT_LIMIT)
+
+    system_prompt = (
+        "Ты — участник Telegram-чата по имени Folk Valley Bot. "
+        "Общайся дружелюбно, кратко, на русском. "
+        "Можешь шутить, использовать эмодзи. Максимум 400 символов. "
+        "Не пиши длинные лекции. Если не знаешь — скажи честно."
+    )
+
+    try:
+        await bot.send_chat_action(chat_id=chat_id, action="typing")
+        answer = await ask_grok(
+            system=system_prompt,
+            history=history,
+            max_tokens=500,
+        )
+        answer = answer.strip()
+        if len(answer) > 3500:
+            answer = answer[:3500] + "..."
+
+        await message.reply(answer)
+        await add_ai_context(chat_id, "assistant", answer)
+        ai_reply_cooldowns[chat_id] = datetime.now()
+
+    except Exception as e:
+        log.error(f"AI reply error: {e}")
+
 
 # ============================================================
 # КОМАНДЫ
@@ -1126,14 +1433,16 @@ bred_stickers = [
 
 @router.message(Command("start"))
 async def start(message: Message):
-    save_chat_id(message.chat.id)
-    add_activity(message.chat.id, message.from_user.id)
+    await save_chat_id(message.chat.id)
+    await add_activity(message.chat.id, message.from_user.id)
     if message.chat.type == "private":
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="👤 Профиль", web_app=WebAppInfo(url=MINI_APP_URL))]
         ])
         await message.answer(
             "👋 Привет! Я бот Folk Valley.\n\n"
+            "🤖 **ИИ:**\n"
+            "• `/ai <вопрос>` — спросить нейросеть\n\n"
             "🎮 **Игры:**\n"
             "• `/game` — выбрать игру\n"
             "• `/answer` — ответ в игре\n"
@@ -1151,15 +1460,76 @@ async def start(message: Message):
             parse_mode="Markdown"
         )
     else:
-        await message.answer("Я в группе! /folk /litvin /bred /sosat /zabava /search /voice /game /top /cat /dog /animal /factme /spin /cooldown /card /ah")
+        await message.answer("Я в группе! /ai /folk /litvin /bred /sosat /zabava /search /voice /game /top /cat /dog /animal /factme /spin /cooldown /card /ah")
+
+
+@router.message(Command("ai"))
+async def ai_cmd(message: Message):
+    args = get_args(message)
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    is_admin = user_id == ADMIN_ID
+
+    if not args:
+        await message.answer(
+            "🤖 **ИИ-ассистент (Groq gpt-oss-120b)**\n\n"
+            "• `/ai <вопрос>` — разовый вопрос\n"
+            "• `/ai on` — включить ИИ-режим (только админ)\n"
+            "• `/ai off` — выключить (только админ)\n\n"
+            f"⚙️ ИИ отвечает на ~{AI_CHANCE_PERCENT}% случайных сообщений "
+            f"и всегда — на реплаи боту.\n"
+            f"⏱ Кулдаун между ответами: {AI_COOLDOWN_SECONDS} сек.",
+            parse_mode="Markdown"
+        )
+        return
+
+    cmd = args[0].lower()
+
+    if cmd in ("on", "off"):
+        if not is_admin:
+            await message.answer("❌ Только админ может включать ИИ.")
+            return
+        if cmd == "on":
+            await set_ai_enabled(chat_id, 1)
+            await message.answer(
+                f"✅ ИИ-режим **включён**.\n"
+                f"Отвечаю на ~{AI_CHANCE_PERCENT}% сообщений и на реплаи.\n"
+                f"Кулдаун: {AI_COOLDOWN_SECONDS} сек."
+            )
+        else:
+            await set_ai_enabled(chat_id, 0)
+            await message.answer("❌ ИИ-режим **выключен**.")
+        return
+
+    prompt = " ".join(args)
+    if len(prompt) > 2000:
+        await message.answer("❌ Слишком длинный вопрос (макс 2000).")
+        return
+
+    status = await message.answer("🤔 Думаю...")
+    try:
+        answer = await ask_grok(
+            prompt,
+            system=(
+                "Ты — дружелюбный ИИ-ассистент в Telegram-боте Folk Valley. "
+                "Отвечай кратко и по делу, на русском. Максимум 800 символов."
+            ),
+            max_tokens=800,
+        )
+        if len(answer) > 3500:
+            answer = answer[:3500] + "..."
+        await status.edit_text(f"🤖 **Ответ ИИ:**\n\n{answer}", parse_mode="Markdown")
+    except Exception as e:
+        log.error(f"Groq error: {e}")
+        await status.edit_text(f"❌ Ошибка ИИ: {e}")
 
 
 @router.message(Command("folk"))
 async def folk(message: Message):
-    save_chat_id(message.chat.id)
-    add_activity(message.chat.id, message.from_user.id)
+    await save_chat_id(message.chat.id)
+    await add_activity(message.chat.id, message.from_user.id)
     chat_id, user_id = message.chat.id, message.from_user.id
-    cool, remain = check_cd(chat_id, user_id, 'folk')
+    cool, remain = await check_cd(chat_id, user_id, 'folk')
     if cool:
         s = max(0, int(remain.total_seconds()))
         m, sec = divmod(s, 60)
@@ -1174,10 +1544,10 @@ async def folk(message: Message):
 
 @router.message(Command("litvin"))
 async def litvin(message: Message):
-    save_chat_id(message.chat.id)
-    add_activity(message.chat.id, message.from_user.id)
+    await save_chat_id(message.chat.id)
+    await add_activity(message.chat.id, message.from_user.id)
     chat_id, user_id = message.chat.id, message.from_user.id
-    cool, remain = check_cd(chat_id, user_id, 'litvin')
+    cool, remain = await check_cd(chat_id, user_id, 'litvin')
     if cool:
         s = max(0, int(remain.total_seconds()))
         m, sec = divmod(s, 60)
@@ -1192,10 +1562,10 @@ async def litvin(message: Message):
 
 @router.message(Command("bred"))
 async def bred(message: Message):
-    save_chat_id(message.chat.id)
-    add_activity(message.chat.id, message.from_user.id)
+    await save_chat_id(message.chat.id)
+    await add_activity(message.chat.id, message.from_user.id)
     chat_id, user_id = message.chat.id, message.from_user.id
-    cool, remain = check_cd(chat_id, user_id, 'bred')
+    cool, remain = await check_cd(chat_id, user_id, 'bred')
     if cool:
         s = max(0, int(remain.total_seconds()))
         m, sec = divmod(s, 60)
@@ -1210,16 +1580,16 @@ async def bred(message: Message):
 
 @router.message(Command("sosat"))
 async def sosat(message: Message):
-    save_chat_id(message.chat.id)
-    add_activity(message.chat.id, message.from_user.id)
+    await save_chat_id(message.chat.id)
+    await add_activity(message.chat.id, message.from_user.id)
     words = random.choices(RANDOM_WORDS, k=random.randint(3, 6))
     await message.answer(" ".join(words))
 
 
 @router.message(Command("zabava"))
 async def zabava(message: Message):
-    save_chat_id(message.chat.id)
-    add_activity(message.chat.id, message.from_user.id)
+    await save_chat_id(message.chat.id)
+    await add_activity(message.chat.id, message.from_user.id)
     if not message.photo and not (message.reply_to_message and message.reply_to_message.photo):
         await message.answer("📸 Отправь фото с подписью /zabava текст или ответь командой на фото.")
         return
@@ -1284,10 +1654,10 @@ async def zabava(message: Message):
 
 @router.message(Command("search"))
 async def search(message: Message):
-    save_chat_id(message.chat.id)
-    add_activity(message.chat.id, message.from_user.id)
+    await save_chat_id(message.chat.id)
+    await add_activity(message.chat.id, message.from_user.id)
     chat_id, user_id = message.chat.id, message.from_user.id
-    cool, remain = check_cd(chat_id, user_id, 'search')
+    cool, remain = await check_cd(chat_id, user_id, 'search')
     if cool:
         s = max(0, int(remain.total_seconds()))
         m, sec = divmod(s, 60)
@@ -1335,10 +1705,10 @@ async def search(message: Message):
 
 @router.message(Command("voice"))
 async def voice(message: Message):
-    save_chat_id(message.chat.id)
-    add_activity(message.chat.id, message.from_user.id)
+    await save_chat_id(message.chat.id)
+    await add_activity(message.chat.id, message.from_user.id)
     chat_id, user_id = message.chat.id, message.from_user.id
-    cool, remain = check_cd(chat_id, user_id, 'voice')
+    cool, remain = await check_cd(chat_id, user_id, 'voice')
     if cool:
         s = max(0, int(remain.total_seconds()))
         m, sec = divmod(s, 60)
@@ -1364,8 +1734,8 @@ async def voice(message: Message):
 
 @router.message(Command("cat"))
 async def cat(message: Message):
-    save_chat_id(message.chat.id)
-    add_activity(message.chat.id, message.from_user.id)
+    await save_chat_id(message.chat.id)
+    await add_activity(message.chat.id, message.from_user.id)
     try:
         r = await asyncio.to_thread(requests.get, "https://api.thecatapi.com/v1/images/search", timeout=10)
         data = r.json()
@@ -1380,8 +1750,8 @@ async def cat(message: Message):
 
 @router.message(Command("dog"))
 async def dog(message: Message):
-    save_chat_id(message.chat.id)
-    add_activity(message.chat.id, message.from_user.id)
+    await save_chat_id(message.chat.id)
+    await add_activity(message.chat.id, message.from_user.id)
     try:
         r = await asyncio.to_thread(requests.get, "https://api.thedogapi.com/v1/images/search", timeout=10)
         data = r.json()
@@ -1396,13 +1766,13 @@ async def dog(message: Message):
 
 @router.message(Command("top"))
 async def top(message: Message):
-    save_chat_id(message.chat.id)
-    add_activity(message.chat.id, message.from_user.id)
+    await save_chat_id(message.chat.id)
+    await add_activity(message.chat.id, message.from_user.id)
     chat_id = message.chat.id
     if message.chat.type not in ["group", "supergroup"]:
         await message.answer("📊 Топ только для групп!")
         return
-    stats = user_stats.get(chat_id, {})
+    stats = await get_chat_stats(chat_id)
     if not stats:
         await message.answer("📊 Пока нет активности!")
         return
@@ -1421,16 +1791,16 @@ async def top(message: Message):
 
 @router.message(Command("factme"))
 async def factme(message: Message):
-    save_chat_id(message.chat.id)
-    add_activity(message.chat.id, message.from_user.id)
+    await save_chat_id(message.chat.id)
+    await add_activity(message.chat.id, message.from_user.id)
     fact = random.choice(FACTS)
     await message.answer(f"🧠 **Факт о тебе, {message.from_user.first_name}:**\n\n{fact}", parse_mode="Markdown")
 
 
 @router.message(Command("animal"))
 async def animal(message: Message):
-    save_chat_id(message.chat.id)
-    add_activity(message.chat.id, message.from_user.id)
+    await save_chat_id(message.chat.id)
+    await add_activity(message.chat.id, message.from_user.id)
     a = random.choice(ANIMALS)
     await message.answer(f"🐾 **Ты — {a['name']}!**\n\n{a['emoji']} {a['description']}", parse_mode="Markdown")
 
@@ -1444,7 +1814,7 @@ async def spin(message: Message):
 
     candidates_map = {}
 
-    known = list(user_stats.get(chat_id, {}).keys())[:200]
+    known = await get_active_users_in_chat(chat_id, limit=200)
     for uid in known:
         try:
             m = await bot.get_chat_member(chat_id, int(uid))
@@ -1531,12 +1901,7 @@ async def chats(message: Message):
     if message.from_user.id != ADMIN_ID:
         await message.answer("❌ Нет прав!")
         return
-    try:
-        with open(CHATS_DB_FILE, "r", encoding="utf-8") as f:
-            ids = json.load(f)
-    except Exception:
-        await message.answer("📭 Нет чатов.")
-        return
+    ids = await get_all_chats()
     if not ids:
         await message.answer("📭 Пусто.")
         return
@@ -1560,10 +1925,8 @@ async def go(message: Message):
     if not text:
         await message.answer("❌ `/go Текст`", parse_mode="Markdown")
         return
-    try:
-        with open(CHATS_DB_FILE, "r", encoding="utf-8") as f:
-            ids = json.load(f)
-    except Exception:
+    ids = await get_all_chats()
+    if not ids:
         await message.answer("❌ Нет чатов!")
         return
     status = await message.answer(f"🚀 Рассылка в {len(ids)}...")
@@ -1587,7 +1950,7 @@ async def donate_broadcast(message: Message):
     if not text:
         await message.answer("❌ `/donate_broadcast Текст`", parse_mode="Markdown")
         return
-    d = load_donations()
+    d = await load_donations()
     if not d:
         await message.answer("📭 Нет донатеров!")
         return
@@ -1609,7 +1972,7 @@ async def donates(message: Message):
     if message.from_user.id != ADMIN_ID:
         await message.answer("❌ Нет прав!")
         return
-    d = load_donations()
+    d = await load_donations()
     if not d:
         await message.answer("📭 Нет донатов!")
         return
@@ -1645,8 +2008,8 @@ async def cancel_cmd(message: Message):
 
 @router.message(Command("game"))
 async def game(message: Message):
-    save_chat_id(message.chat.id)
-    add_activity(message.chat.id, message.from_user.id)
+    await save_chat_id(message.chat.id)
+    await add_activity(message.chat.id, message.from_user.id)
     chat_id = message.chat.id
     user_id = message.from_user.id
     if chat_id in games and games[chat_id]["active"]:
@@ -1663,8 +2026,8 @@ async def game(message: Message):
 
 @router.message(Command("answer"))
 async def answer(message: Message):
-    save_chat_id(message.chat.id)
-    add_activity(message.chat.id, message.from_user.id)
+    await save_chat_id(message.chat.id)
+    await add_activity(message.chat.id, message.from_user.id)
     chat_id = message.chat.id
     user_id = message.from_user.id
     if chat_id not in games or not games[chat_id]["active"]:
@@ -2037,30 +2400,38 @@ async def card_callback(query: CallbackQuery):
             except TelegramBadRequest:
                 pass
             return
-    if is_premium and get_user_balance(user_id) < 50:
-        try:
-            await query.message.edit_text("❌ Нужно 50 монет!")
-        except TelegramBadRequest:
-            pass
-        return
+
+    if is_premium:
+        balance = await get_user_balance(user_id)
+        if balance < 50:
+            try:
+                await query.message.edit_text("❌ Нужно 50 монет!")
+            except TelegramBadRequest:
+                pass
+            return
+
     rarity = roll_rarity(is_premium)
-    card_id, card_data = get_card_by_rarity(rarity)
+    card_id, card_data = await get_card_by_rarity(rarity)
     if not card_data:
         try:
             await query.message.edit_text("❌ Карточка не найдена. Монеты не списаны.")
         except TelegramBadRequest:
             pass
         return
+
     if is_premium:
-        update_user_balance(user_id, -50)
-    new_card = add_card_to_user(user_id, card_id, card_data)
+        await update_user_balance(user_id, -50)
+
+    new_card = await add_card_to_user(user_id, card_id, card_data)
     card_cooldowns[user_id] = now
+
     emojis = {"обычная": "⬜", "редкая": "🟦", "эпическая": "🟪",
               "мифическая": "🌟", "легендарная": "👑", "секретная": "🔮"}
+    balance = await get_user_balance(user_id)
     caption = (
         f"{emojis.get(rarity, '🃏')} **{card_data['name']}**\n"
         f"📊 Редкость: {rarity}\n"
-        f"💰 Баланс: {get_user_balance(user_id)}\n\n"
+        f"💰 Баланс: {balance}\n\n"
         "🔄 Следующая через 10 минут."
     )
     file_id = card_data.get("file_id")
@@ -2086,12 +2457,13 @@ async def card_callback(query: CallbackQuery):
             await query.message.edit_text(caption + "\n\n🖼️ Нет изображения.", parse_mode="Markdown")
         except TelegramBadRequest:
             pass
+
     if rarity == "секретная":
         try:
             user = query.from_user
             uname = f"@{user.username}" if user.username else user.first_name
             await bot.send_message(ADMIN_ID,
-                f"🔮 **СЕКРЕТНАЯ!**\n\n👤 {uname} (ID: `{user.id}`)\n🃏 **{card_data['name']}**\n💰 {get_user_balance(user_id)}",
+                f"🔮 **СЕКРЕТНАЯ!**\n\n👤 {uname} (ID: `{user.id}`)\n🃏 **{card_data['name']}**\n💰 {balance}",
                 parse_mode="Markdown")
         except Exception:
             pass
@@ -2111,12 +2483,13 @@ async def card(message: Message):
             m, s = divmod(int(tl.total_seconds()), 60)
             await message.answer(f"⏳ Подожди {m} мин {s} сек!")
             return
+    balance = await get_user_balance(user_id)
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="🎴 Обычная (0)", callback_data="card_free"),
         InlineKeyboardButton(text="💎 Платная (50)", callback_data="card_premium"),
     ]])
     await message.answer(
-        f"🎴 **Открыть карточку!**\n\n💰 Баланс: {get_user_balance(user_id)}",
+        f"🎴 **Открыть карточку!**\n\n💰 Баланс: {balance}",
         reply_markup=kb, parse_mode="Markdown"
     )
 
@@ -2124,15 +2497,15 @@ async def card(message: Message):
 @router.message(Command("profile"))
 async def profile(message: Message):
     user_id = message.from_user.id
-    ud = get_user_card_data(user_id)
-    cards = ud.get("cards", [])
+    u = await get_user(user_id)
+    cards = await get_user_cards(user_id)
     rc = {}
     for c in cards:
         r = c.get("rarity", "неизвестно")
         rc[r] = rc.get(r, 0) + 1
     emojis = {"обычная": "⬜", "редкая": "🟦", "эпическая": "🟪",
               "мифическая": "🌟", "легендарная": "👑", "секретная": "🔮"}
-    text = f"👤 **Профиль**\n\n💰 {ud.get('balance', 0)}\n🃏 Всего: {ud.get('total_cards', 0)}\n\n📊 **Редкости:**\n"
+    text = f"👤 **Профиль**\n\n💰 {u['balance']}\n🃏 Всего: {u['total_cards']}\n\n📊 **Редкости:**\n"
     for r, c in rc.items():
         text += f"{emojis.get(r, '🃏')} {r}: {c}\n"
     if cards:
@@ -2146,8 +2519,7 @@ async def profile(message: Message):
 @router.message(Command("mycards"))
 async def my_cards(message: Message):
     user_id = message.from_user.id
-    ud = get_user_card_data(user_id)
-    cards = ud.get("cards", [])
+    cards = await get_user_cards(user_id)
     if not cards:
         await message.answer("📭 У тебя нет карточек.")
         return
@@ -2167,13 +2539,133 @@ async def my_cards(message: Message):
 # АУКЦИОН
 # ============================================================
 
+def _lot_emoji(rarity):
+    return {"обычная": "⬜", "редкая": "🟦", "эпическая": "🟪",
+            "мифическая": "🌟", "легендарная": "👑", "секретная": "🔮"}.get(rarity, "🃏")
+
+
+async def _render_auction_page(page: int):
+    a = await load_auction()
+    if not a:
+        return ("📭 На аукционе нет лотов.\n\nВыстави свою через `/ah sell`", None)
+    lots = list(a.items())
+    total = len(lots)
+    total_pages = max(1, (total + AUCTION_PAGE_SIZE - 1) // AUCTION_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    start = page * AUCTION_PAGE_SIZE
+    page_lots = lots[start:start + AUCTION_PAGE_SIZE]
+    rows = []
+    for lot_id, lot in page_lots:
+        em = _lot_emoji(lot.get("rarity"))
+        name = (lot.get("card_name") or "?")[:22]
+        price = lot.get("price", 0)
+        rows.append([InlineKeyboardButton(
+            text=f"{em} {name} — {price} 💎",
+            callback_data=f"ah_view:{lot_id}"
+        )])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"ah_page:{page-1}"))
+    nav.append(InlineKeyboardButton(text=f"• {page+1}/{total_pages} •", callback_data="noop"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"ah_page:{page+1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(text="🃏 Продать свою карточку", callback_data="sell_page:0")])
+    text = f"🏷️ **Аукцион**\n\n📦 Лотов: **{total}**\n📄 Страница {page+1} / {total_pages}"
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _render_sell_page(user_id: int, page: int):
+    cards = await get_user_cards(user_id)
+    if not cards:
+        return ("❌ У тебя нет карточек.\nОткрой через `/card`", None)
+    total = len(cards)
+    total_pages = max(1, (total + SELL_PAGE_SIZE - 1) // SELL_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    start = page * SELL_PAGE_SIZE
+    page_cards = cards[start:start + SELL_PAGE_SIZE]
+    rows = []
+    for c in page_cards:
+        em = _lot_emoji(c.get("rarity"))
+        name = (c.get("name") or "?")[:22]
+        rarity = c.get("rarity", "обычная")
+        bot_price = SELL_TO_BOT_PRICES.get(rarity, 0)
+        iid = c["instance_id"]
+        rows.append([InlineKeyboardButton(text=f"{em} {name} ({rarity})", callback_data="noop")])
+        rows.append([
+            InlineKeyboardButton(text=f"💵 Боту за {bot_price}", callback_data=f"sell_bot:{iid}"),
+            InlineKeyboardButton(text="🏷️ На аукцион", callback_data=f"sell_pick:{iid}"),
+        ])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"sell_page:{page-1}"))
+    nav.append(InlineKeyboardButton(text=f"• {page+1}/{total_pages} •", callback_data="noop"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"sell_page:{page+1}"))
+    if nav:
+        rows.append(nav)
+    bulk_buttons = []
+    for r in BULK_SELL_RARITIES:
+        count = sum(1 for c in cards if c.get("rarity") == r)
+        if count > 0:
+            total_price = count * SELL_TO_BOT_PRICES.get(r, 0)
+            bulk_buttons.append([InlineKeyboardButton(
+                text=f"💵 Все {r} ({count} шт = {total_price} 💎)",
+                callback_data=f"bulk_open:{r}"
+            )])
+    rows.extend(bulk_buttons)
+    rows.append([InlineKeyboardButton(text="🏷️ К аукциону", callback_data="ah_page:0")])
+    text = (
+        f"🃏 **Продажа карточек**\n\n"
+        f"📦 Всего у тебя: **{total}**\n"
+        f"📄 Страница {page+1} / {total_pages}\n\n"
+        f"💵 — продать боту мгновенно\n"
+        f"🏷️ — выставить на аукцион"
+    )
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _transfer_lot(buyer_id: int, lot_id: str):
+    a = await load_auction()
+    lot = a.get(lot_id)
+    if not lot:
+        return False, "Лот не найден"
+    seller_id = lot["seller"]
+    price = lot["price"]
+    if seller_id == buyer_id:
+        return False, "Нельзя купить свою карточку"
+    balance = await get_user_balance(buyer_id)
+    if balance < price:
+        return False, "Недостаточно монет"
+    card = {
+        "instance_id": lot["instance_id"],
+        "card_id": lot.get("card_id", "unknown"),
+        "name": lot.get("card_name", "Карточка"),
+        "rarity": lot.get("rarity", "обычная"),
+        "file_id": lot.get("file_id", ""),
+    }
+    await update_user_balance(buyer_id, -price)
+    await update_user_balance(seller_id, price)
+    # Покупателю карточку — через прямой INSERT (чтобы не путать с add_card_to_user)
+    await db_execute_async(
+        "INSERT INTO cards (instance_id, user_id, card_id, name, rarity, file_id) VALUES (?, ?, ?, ?, ?, ?)",
+        (card["instance_id"], buyer_id, card["card_id"], card["name"], card["rarity"], card["file_id"])
+    )
+    await db_execute_async(
+        "UPDATE users SET total_cards = total_cards + 1 WHERE user_id = ?",
+        (buyer_id,)
+    )
+    await delete_auction_lot(lot_id)
+    return True, None
+
+
 @router.message(Command("ah"))
 @router.message(Command("auction"))
 async def auction(message: Message):
     args = get_args(message)
-
     if args and args[0].lower() == "sell":
-        text, kb = render_sell_page(message.from_user.id, 0)
+        text, kb = await _render_sell_page(message.from_user.id, 0)
         try:
             if kb is None:
                 await message.answer(text, parse_mode="Markdown")
@@ -2182,29 +2674,27 @@ async def auction(message: Message):
         except TelegramBadRequest:
             pass
         return
-
     if args and args[0].lower() == "buy" and len(args) >= 2:
         lot_id = args[1]
         user_id = message.from_user.id
-        a = load_auction()
-        lot = a.get(lot_id)
+        lot = await get_auction_lot(lot_id)
         if not lot:
             await message.answer("❌ Лот не найден или уже продан!")
             return
         if lot["seller"] == user_id:
             await message.answer("❌ Ты не можешь купить свою карточку!")
             return
-        if get_user_balance(user_id) < lot["price"]:
+        balance = await get_user_balance(user_id)
+        if balance < lot["price"]:
             await message.answer(f"❌ Недостаточно монет! Нужно {lot['price']}.")
             return
-        ok, err = _transfer_lot(user_id, lot_id)
+        ok, err = await _transfer_lot(user_id, lot_id)
         if not ok:
             await message.answer(f"❌ {err}")
             return
         await message.answer(f"✅ Куплено **{lot['card_name']}** за {lot['price']} монет!", parse_mode="Markdown")
         return
-
-    text, kb = render_auction_page(0)
+    text, kb = await _render_auction_page(0)
     try:
         if kb is None:
             await message.answer(text, parse_mode="Markdown")
@@ -2223,7 +2713,7 @@ async def noop_cb(query: CallbackQuery):
 async def ah_page_cb(query: CallbackQuery):
     await query.answer()
     page = int(query.data.split(":")[1])
-    text, kb = render_auction_page(page)
+    text, kb = await _render_auction_page(page)
     try:
         if kb is None:
             await query.message.edit_text(text, parse_mode="Markdown")
@@ -2237,26 +2727,22 @@ async def ah_page_cb(query: CallbackQuery):
 async def ah_view_cb(query: CallbackQuery):
     await query.answer()
     lot_id = query.data.split(":", 1)[1]
-    a = load_auction()
-    lot = a.get(lot_id)
+    lot = await get_auction_lot(lot_id)
     if not lot:
         try:
             await query.message.edit_text("❌ Лот не найден или уже продан.")
         except TelegramBadRequest:
             pass
         return
-
     user_id = query.from_user.id
     is_own = lot["seller"] == user_id
-    balance = get_user_balance(user_id)
-
+    balance = await get_user_balance(user_id)
     seller_name = f"ID `{lot['seller']}`"
     try:
         chat = await bot.get_chat(lot["seller"])
         seller_name = f"@{chat.username}" if chat.username else (chat.first_name or "Пользователь")
     except Exception:
         pass
-
     em = _lot_emoji(lot.get("rarity"))
     text = (
         f"{em} **{lot.get('card_name', '?')}**\n"
@@ -2267,7 +2753,6 @@ async def ah_view_cb(query: CallbackQuery):
     )
     if is_own:
         text += "\n\n⚠️ Это твоя карточка."
-
     rows = []
     if not is_own:
         if balance >= lot.get("price", 0):
@@ -2281,7 +2766,6 @@ async def ah_view_cb(query: CallbackQuery):
                 callback_data="noop"
             )])
     rows.append([InlineKeyboardButton(text="⬅️ К аукциону", callback_data="ah_page:0")])
-
     try:
         await query.message.edit_text(
             text,
@@ -2297,41 +2781,36 @@ async def ah_buy_cb(query: CallbackQuery):
     await query.answer()
     lot_id = query.data.split(":", 1)[1]
     user_id = query.from_user.id
-
-    a = load_auction()
-    lot = a.get(lot_id)
+    lot = await get_auction_lot(lot_id)
     if not lot:
         try:
             await query.message.edit_text("❌ Лот не найден или уже продан.")
         except TelegramBadRequest:
             pass
         return
-
     if lot["seller"] == user_id:
         await query.answer("Нельзя купить свою карточку", show_alert=True)
         return
-
-    if get_user_balance(user_id) < lot["price"]:
+    balance = await get_user_balance(user_id)
+    if balance < lot["price"]:
         await query.answer("Недостаточно монет", show_alert=True)
         return
-
     card_name = lot.get("card_name", "?")
     price = lot["price"]
-
-    ok, err = _transfer_lot(user_id, lot_id)
+    ok, err = await _transfer_lot(user_id, lot_id)
     if not ok:
         try:
             await query.message.edit_text(f"❌ {err}")
         except TelegramBadRequest:
             pass
         return
-
+    new_balance = await get_user_balance(user_id)
     try:
         await query.message.edit_text(
             f"✅ **Покупка успешна!**\n\n"
             f"🃏 Карточка: **{card_name}**\n"
             f"💰 Заплачено: **{price}** монет\n"
-            f"💼 Баланс: **{get_user_balance(user_id)}**",
+            f"💼 Баланс: **{new_balance}**",
             parse_mode="Markdown"
         )
     except TelegramBadRequest:
@@ -2342,7 +2821,7 @@ async def ah_buy_cb(query: CallbackQuery):
 async def sell_page_cb(query: CallbackQuery):
     await query.answer()
     page = int(query.data.split(":")[1])
-    text, kb = render_sell_page(query.from_user.id, page)
+    text, kb = await _render_sell_page(query.from_user.id, page)
     try:
         if kb is None:
             await query.message.edit_text(text, parse_mode="Markdown")
@@ -2357,18 +2836,14 @@ async def sell_pick(query: CallbackQuery):
     await query.answer()
     user_id = query.from_user.id
     instance_id = query.data.split(":", 1)[1]
-
-    ud = get_user_card_data(user_id)
-    card = next((c for c in ud.get("cards", []) if c.get("instance_id") == instance_id), None)
-    if not card:
+    card = await get_card_by_instance(instance_id)
+    if not card or card["user_id"] != user_id:
         try:
             await query.message.edit_text("❌ Карточка не найдена в инвентаре!")
         except TelegramBadRequest:
             pass
         return
-
     pending_sell[user_id] = instance_id
-
     em = _lot_emoji(card.get("rarity"))
     try:
         await query.message.edit_text(
@@ -2392,54 +2867,256 @@ async def sell_cancel_cb(query: CallbackQuery):
         pass
 
 
-async def handle_sell_price(message: Message):
-    user_id = message.from_user.id
-    instance_id = pending_sell.pop(user_id, None)
-    if not instance_id:
+@router.callback_query(F.data.startswith("sell_bot:"))
+async def sell_bot_cb(query: CallbackQuery):
+    user_id = query.from_user.id
+    instance_id = query.data.split(":", 1)[1]
+    card = await get_card_by_instance(instance_id)
+    if not card or card["user_id"] != user_id:
+        await query.answer("Карточка не найдена", show_alert=True)
         return
+    rarity = card.get("rarity", "обычная")
+    price = SELL_TO_BOT_PRICES.get(rarity, 0)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=f"✅ Продать за {price}", callback_data=f"sell_bot_confirm:{instance_id}"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="sell_bot_cancel"),
+    ]])
+    em = _lot_emoji(rarity)
+    balance = await get_user_balance(user_id)
+    try:
+        await query.message.edit_text(
+            f"{em} **{card['name']}** ({rarity})\n\n"
+            f"💵 Цена продажи боту: **{price}** монет\n\n"
+            f"⚠️ Карточка будет **удалена** из твоего инвентаря.\n"
+            f"💼 Текущий баланс: {balance}",
+            reply_markup=kb,
+            parse_mode="Markdown"
+        )
+    except TelegramBadRequest:
+        pass
+    await query.answer()
 
-    text = (message.text or "").strip()
-    if not text.isdigit():
-        await message.answer("❌ Цена должна быть числом! Продажа отменена.")
+
+@router.callback_query(F.data.startswith("sell_bot_confirm:"))
+async def sell_bot_confirm_cb(query: CallbackQuery):
+    user_id = query.from_user.id
+    instance_id = query.data.split(":", 1)[1]
+    card = await get_card_by_instance(instance_id)
+    if not card or card["user_id"] != user_id:
+        await query.answer("Карточка уже продана", show_alert=True)
         return
-
-    price = int(text)
-    if price <= 0:
-        await message.answer("❌ Цена должна быть больше 0!")
+    rarity = card.get("rarity", "обычная")
+    price = SELL_TO_BOT_PRICES.get(rarity, 0)
+    deleted = await delete_card(instance_id, user_id)
+    if not deleted:
+        await query.answer("Ошибка удаления", show_alert=True)
         return
-    if price > 1_000_000:
-        await message.answer("❌ Слишком большая цена (макс 1 000 000).")
-        return
+    new_balance = await update_user_balance(user_id, price)
+    em = _lot_emoji(rarity)
+    try:
+        await query.message.edit_text(
+            f"✅ **Продано!**\n\n"
+            f"{em} {card['name']} ({rarity})\n"
+            f"💵 Получено: **+{price}** монет\n"
+            f"💼 Новый баланс: **{new_balance}**",
+            parse_mode="Markdown"
+        )
+    except TelegramBadRequest:
+        pass
+    await query.answer(f"+{price} 💎")
 
-    ud = get_user_card_data(user_id)
-    card_found = next((c for c in ud.get("cards", []) if c.get("instance_id") == instance_id), None)
-    if not card_found:
-        await message.answer("❌ Карточка уже не в инвентаре.")
-        return
 
-    ud["cards"] = [c for c in ud["cards"] if c.get("instance_id") != instance_id]
-    save_user_card_data(user_id, ud)
+@router.callback_query(F.data == "sell_bot_cancel")
+async def sell_bot_cancel_cb(query: CallbackQuery):
+    await query.answer("Отменено")
+    text, kb = await _render_sell_page(query.from_user.id, 0)
+    try:
+        if kb is None:
+            await query.message.edit_text(text, parse_mode="Markdown")
+        else:
+            await query.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    except TelegramBadRequest:
+        pass
 
-    a = load_auction()
-    lot_id = f"lot_{int(time.time()*1000)}_{random.randint(1000,9999)}"
-    a[lot_id] = {
-        "seller": user_id,
-        "card_name": card_found.get("name"),
-        "card_id": card_found.get("card_id"),
-        "rarity": card_found.get("rarity"),
-        "file_id": card_found.get("file_id", ""),
-        "instance_id": instance_id,
-        "price": price,
-        "created": datetime.now().isoformat(),
-    }
-    save_auction(a)
 
-    await message.answer(
-        f"✅ **{card_found.get('name')}** выставлена за **{price}** монет!\n"
-        f"ID лота: `{lot_id}`\n\n"
-        f"Смотри свои лоты: `/ah`",
-        parse_mode="Markdown"
+# ==================== МАССОВАЯ ПРОДАЖА ====================
+
+async def _render_bulk_screen(user_id: int):
+    state = bulk_sell_state.get(user_id)
+    if not state:
+        return None, None
+    rarity = state["rarity"]
+    count = state["count"]
+    matching = await get_cards_by_rarity(user_id, rarity)
+    available = len(matching)
+    if available == 0:
+        bulk_sell_state.pop(user_id, None)
+        return None, None
+    count = max(1, min(count, available))
+    state["count"] = count
+    price_one = SELL_TO_BOT_PRICES.get(rarity, 0)
+    total_price = count * price_one
+    em = _lot_emoji(rarity)
+    text = (
+        f"💵 **Продажа: {rarity}**\n\n"
+        f"У тебя: **{available}** карточек этой редкости\n"
+        f"Выбрано: **{count}**\n\n"
+        f"💰 Цена за 1: **{price_one}** 💎\n"
+        f"💵 Итого: **{total_price}** 💎"
     )
+    rows = []
+    nav = []
+    if count > 1:
+        nav.append(InlineKeyboardButton(text="➖", callback_data="bulk_dec"))
+    nav.append(InlineKeyboardButton(text=f"{count} / {available}", callback_data="noop"))
+    if count < available:
+        nav.append(InlineKeyboardButton(text="➕", callback_data="bulk_inc"))
+    rows.append(nav)
+    if count == 1:
+        rows.append([InlineKeyboardButton(
+            text=f"💵 Продать 1 ({price_one} 💎)",
+            callback_data="bulk_confirm"
+        )])
+    else:
+        rows.append([InlineKeyboardButton(
+            text=f"💵 Продать {count} ({total_price} 💎)",
+            callback_data="bulk_confirm"
+        )])
+    if count != available:
+        rows.append([InlineKeyboardButton(
+            text=f"💵 Все {available} ({available * price_one} 💎)",
+            callback_data="bulk_all"
+        )])
+    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="bulk_cancel")])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data.startswith("bulk_open:"))
+async def bulk_open_cb(query: CallbackQuery):
+    await query.answer()
+    rarity = query.data.split(":", 1)[1]
+    if rarity not in BULK_SELL_RARITIES:
+        return
+    user_id = query.from_user.id
+    matching = await get_cards_by_rarity(user_id, rarity)
+    if not matching:
+        await query.answer("У тебя нет таких карточек", show_alert=True)
+        return
+    bulk_sell_state[user_id] = {"rarity": rarity, "count": 1}
+    text, kb = await _render_bulk_screen(user_id)
+    if kb is None:
+        return
+    try:
+        await query.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    except TelegramBadRequest:
+        pass
+
+
+@router.callback_query(F.data == "bulk_inc")
+async def bulk_inc_cb(query: CallbackQuery):
+    await query.answer()
+    user_id = query.from_user.id
+    state = bulk_sell_state.get(user_id)
+    if not state:
+        return
+    state["count"] += 1
+    text, kb = await _render_bulk_screen(user_id)
+    if kb is None:
+        return
+    try:
+        await query.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    except TelegramBadRequest:
+        pass
+
+
+@router.callback_query(F.data == "bulk_dec")
+async def bulk_dec_cb(query: CallbackQuery):
+    await query.answer()
+    user_id = query.from_user.id
+    state = bulk_sell_state.get(user_id)
+    if not state:
+        return
+    state["count"] = max(1, state["count"] - 1)
+    text, kb = await _render_bulk_screen(user_id)
+    if kb is None:
+        return
+    try:
+        await query.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    except TelegramBadRequest:
+        pass
+
+
+@router.callback_query(F.data == "bulk_all")
+async def bulk_all_cb(query: CallbackQuery):
+    await query.answer()
+    user_id = query.from_user.id
+    state = bulk_sell_state.get(user_id)
+    if not state:
+        return
+    rarity = state["rarity"]
+    matching = await get_cards_by_rarity(user_id, rarity)
+    state["count"] = len(matching)
+    text, kb = await _render_bulk_screen(user_id)
+    if kb is None:
+        return
+    try:
+        await query.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    except TelegramBadRequest:
+        pass
+
+
+@router.callback_query(F.data == "bulk_cancel")
+async def bulk_cancel_cb(query: CallbackQuery):
+    await query.answer()
+    bulk_sell_state.pop(query.from_user.id, None)
+    text, kb = await _render_sell_page(query.from_user.id, 0)
+    try:
+        if kb is None:
+            await query.message.edit_text(text, parse_mode="Markdown")
+        else:
+            await query.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    except TelegramBadRequest:
+        pass
+
+
+@router.callback_query(F.data == "bulk_confirm")
+async def bulk_confirm_cb(query: CallbackQuery):
+    user_id = query.from_user.id
+    state = bulk_sell_state.get(user_id)
+    if not state:
+        await query.answer("Сессия истекла", show_alert=True)
+        return
+    rarity = state["rarity"]
+    count_wanted = state["count"]
+    matching = await get_cards_by_rarity(user_id, rarity)
+    if not matching:
+        bulk_sell_state.pop(user_id, None)
+        await query.answer("Таких карточек больше нет", show_alert=True)
+        return
+    to_sell = matching[:count_wanted]
+    sell_ids = [c["instance_id"] for c in to_sell]
+    price_one = SELL_TO_BOT_PRICES.get(rarity, 0)
+    total_price = price_one * len(to_sell)
+    for iid in sell_ids:
+        await delete_card(iid, user_id)
+    new_balance = await update_user_balance(user_id, total_price)
+    remaining = len(matching) - len(to_sell)
+    if remaining <= 0:
+        bulk_sell_state.pop(user_id, None)
+    else:
+        state["count"] = 1
+    await query.answer(f"+{total_price} 💎", show_alert=False)
+    em = _lot_emoji(rarity)
+    try:
+        await query.message.edit_text(
+            f"✅ **Продано {len(to_sell)} шт.**\n\n"
+            f"{em} {rarity}\n"
+            f"💵 Получено: **+{total_price}** монет\n"
+            f"💼 Новый баланс: **{new_balance}**",
+            parse_mode="Markdown"
+        )
+    except TelegramBadRequest:
+        pass
 
 
 # ============================================================
@@ -2451,7 +3128,7 @@ async def list_cards(message: Message):
     if message.from_user.id != ADMIN_ID:
         await message.answer("❌ Нет прав!")
         return
-    cards = load_cards_data()
+    cards = await get_cards_catalog()
     if not cards:
         await message.answer("📭 Нет карточек!")
         return
@@ -2479,12 +3156,11 @@ async def add_card(message: Message):
     if rarity not in ["обычная", "редкая", "эпическая", "мифическая", "легендарная", "секретная"]:
         await message.answer("❌ Неверная редкость!")
         return
-    cards = load_cards_data()
-    if card_id in cards:
+    catalog = await get_cards_catalog()
+    if card_id in catalog:
         await message.answer(f"❌ ID `{card_id}` уже есть!", parse_mode="Markdown")
         return
-    cards[card_id] = {"name": name, "rarity": rarity, "file_id": file_id}
-    save_cards_data(cards)
+    await upsert_card_catalog(card_id, name, rarity, file_id)
     await message.answer(f"✅ **{name}** добавлена!", parse_mode="Markdown")
 
 
@@ -2497,41 +3173,13 @@ async def remove_card(message: Message):
     if not args:
         await message.answer("❌ `/removecard <id>`", parse_mode="Markdown")
         return
-    cards = load_cards_data()
-    if args[0] not in cards:
+    catalog = await get_cards_catalog()
+    if args[0] not in catalog:
         await message.answer(f"❌ `{args[0]}` не найдена!", parse_mode="Markdown")
         return
-    name = cards[args[0]].get("name", "?")
-    del cards[args[0]]
-    save_cards_data(cards)
+    name = catalog[args[0]].get("name", "?")
+    await delete_card_catalog(args[0])
     await message.answer(f"✅ **{name}** удалена!", parse_mode="Markdown")
-
-
-@router.message(Command("editcard"))
-async def edit_card(message: Message):
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("❌ Нет прав!")
-        return
-    args = get_args(message)
-    if len(args) < 3:
-        await message.answer("❌ `/editcard <id> <name|rarity|file_id> <значение>`", parse_mode="Markdown")
-        return
-    card_id, field = args[0], args[1].lower()
-    value = " ".join(args[2:])
-    if field not in ["name", "rarity", "file_id"]:
-        await message.answer("❌ Поля: name, rarity, file_id")
-        return
-    cards = load_cards_data()
-    if card_id not in cards:
-        await message.answer(f"❌ `{card_id}` не найдена!", parse_mode="Markdown")
-        return
-    if field == "rarity" and value not in ["обычная", "редкая", "эпическая", "мифическая", "легендарная", "секретная"]:
-        await message.answer("❌ Неверная редкость!")
-        return
-    old = cards[card_id].get(field, "?")
-    cards[card_id][field] = value
-    save_cards_data(cards)
-    await message.answer(f"✅ `{field}` обновлено: `{old}` → `{value}`", parse_mode="Markdown")
 
 
 @router.message(Command("givecard"))
@@ -2549,12 +3197,12 @@ async def give_card(message: Message):
         await message.answer("❌ user_id должен быть числом!")
         return
     card_id = args[1]
-    cards = load_cards_data()
-    if card_id not in cards:
+    catalog = await get_cards_catalog()
+    if card_id not in catalog:
         await message.answer(f"❌ Карточка `{card_id}` не найдена! Смотри `/listcards`", parse_mode="Markdown")
         return
-    card_data = cards[card_id]
-    new_card = add_card_to_user(target_id, card_id, card_data)
+    card_data = catalog[card_id]
+    new_card = await add_card_to_user(target_id, card_id, card_data)
     await message.answer(
         f"✅ **{card_data['name']}** выдана `{target_id}`\nID: `{new_card['instance_id']}`",
         parse_mode="Markdown"
@@ -2579,7 +3227,7 @@ async def give_money(message: Message):
     if amount <= 0:
         await message.answer("❌ Сумма > 0!")
         return
-    nb = update_user_balance(target, amount)
+    nb = await update_user_balance(target, amount)
     await message.answer(f"✅ Выдано {amount} пользователю `{target}`. Новый баланс: {nb}", parse_mode="Markdown")
 
 
@@ -2597,8 +3245,8 @@ async def getid(message: Message):
 
 @router.message(Command("cooldown"))
 async def cooldown_cmd(message: Message):
-    save_chat_id(message.chat.id)
-    add_activity(message.chat.id, message.from_user.id)
+    await save_chat_id(message.chat.id)
+    await add_activity(message.chat.id, message.from_user.id)
     if message.chat.type not in ("group", "supergroup"):
         return
     try:
@@ -2610,11 +3258,11 @@ async def cooldown_cmd(message: Message):
     except Exception:
         await message.answer("Бот должен быть админом.")
         return
-    f = get_cd(message.chat.id, 'folk')
-    l = get_cd(message.chat.id, 'litvin')
-    b = get_cd(message.chat.id, 'bred')
-    s = get_cd(message.chat.id, 'search')
-    v = get_cd(message.chat.id, 'voice')
+    f = await get_cd(message.chat.id, 'folk')
+    l = await get_cd(message.chat.id, 'litvin')
+    b = await get_cd(message.chat.id, 'bred')
+    s = await get_cd(message.chat.id, 'search')
+    v = await get_cd(message.chat.id, 'voice')
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"Folk ({f}с)", callback_data="cd:folk")],
         [InlineKeyboardButton(text=f"Litvin ({l}с)", callback_data="cd:litvin")],
@@ -2677,7 +3325,7 @@ async def payment_successful(message: Message):
         bot._processed_payments = set()
     if charge_id and charge_id in bot._processed_payments:
         return
-    add_donation(message.from_user.id, payment.total_amount)
+    await add_donation(message.from_user.id, payment.total_amount)
     if charge_id:
         bot._processed_payments.add(charge_id)
     await message.answer(
@@ -2692,7 +3340,7 @@ async def payment_successful(message: Message):
 
 @router.message(F.new_chat_members)
 async def welcome_new_member(message: Message):
-    save_chat_id(message.chat.id)
+    await save_chat_id(message.chat.id)
     for member in message.new_chat_members:
         if member.id == bot.id:
             continue
@@ -2701,7 +3349,7 @@ async def welcome_new_member(message: Message):
 
 
 # ============================================================
-# ТРИГГЕРЫ И ТЕКСТОВЫЙ РОУТЕР (САМЫЙ НИЗ!)
+# ТРИГГЕРЫ
 # ============================================================
 
 async def handle_triggers(message: Message):
@@ -2711,9 +3359,9 @@ async def handle_triggers(message: Message):
     user_id = message.from_user.id
 
     if "бугульма" in tl:
-        save_chat_id(chat_id)
-        add_activity(chat_id, user_id)
-        cool, remain = check_cd(chat_id, user_id, 'folk')
+        await save_chat_id(chat_id)
+        await add_activity(chat_id, user_id)
+        cool, remain = await check_cd(chat_id, user_id, 'folk')
         if cool:
             s = max(0, int(remain.total_seconds()))
             m, sec = divmod(s, 60)
@@ -2724,9 +3372,9 @@ async def handle_triggers(message: Message):
             use_cd(chat_id, user_id, 'folk')
         return
     if "литвин" in tl:
-        save_chat_id(chat_id)
-        add_activity(chat_id, user_id)
-        cool, remain = check_cd(chat_id, user_id, 'litvin')
+        await save_chat_id(chat_id)
+        await add_activity(chat_id, user_id)
+        cool, remain = await check_cd(chat_id, user_id, 'litvin')
         if cool:
             s = max(0, int(remain.total_seconds()))
             m, sec = divmod(s, 60)
@@ -2737,9 +3385,9 @@ async def handle_triggers(message: Message):
             use_cd(chat_id, user_id, 'litvin')
         return
     if "бред" in tl:
-        save_chat_id(chat_id)
-        add_activity(chat_id, user_id)
-        cool, remain = check_cd(chat_id, user_id, 'bred')
+        await save_chat_id(chat_id)
+        await add_activity(chat_id, user_id)
+        cool, remain = await check_cd(chat_id, user_id, 'bred')
         if cool:
             s = max(0, int(remain.total_seconds()))
             m, sec = divmod(s, 60)
@@ -2750,20 +3398,20 @@ async def handle_triggers(message: Message):
             use_cd(chat_id, user_id, 'bred')
         return
     if tl == "мой факт":
-        save_chat_id(chat_id)
-        add_activity(chat_id, user_id)
+        await save_chat_id(chat_id)
+        await add_activity(chat_id, user_id)
         fact = random.choice(FACTS)
         await message.answer(f"🧠 **Факт о тебе, {message.from_user.first_name}:**\n\n{fact}", parse_mode="Markdown")
         return
     if tl in ["моё животное", "мое животное"]:
-        save_chat_id(chat_id)
-        add_activity(chat_id, user_id)
+        await save_chat_id(chat_id)
+        await add_activity(chat_id, user_id)
         a = random.choice(ANIMALS)
         await message.answer(f"🐾 **Ты — {a['name']}!**\n\n{a['emoji']} {a['description']}", parse_mode="Markdown")
         return
     if text in ["п", "П", "p", "P"]:
-        save_chat_id(chat_id)
-        add_activity(chat_id, user_id)
+        await save_chat_id(chat_id)
+        await add_activity(chat_id, user_id)
         await message.answer("п")
         return
 
@@ -2777,12 +3425,7 @@ async def handle_broadcast_all_input(message: Message):
     if not text:
         await message.answer("❌ Пусто. Отменено.")
         return
-    try:
-        with open(CHATS_DB_FILE, "r", encoding="utf-8") as f:
-            ids = json.load(f)
-    except Exception:
-        await message.answer("❌ Нет чатов!")
-        return
+    ids = await get_all_chats()
     if not ids:
         await message.answer("❌ Пусто!")
         return
@@ -2811,7 +3454,7 @@ async def cd_input(message: Message):
     if not 0 <= sec <= 3600:
         await message.answer("0-3600. Отмена.")
         return
-    chat_cooldowns.setdefault(message.chat.id, {})[cmd] = sec
+    await set_cd(message.chat.id, cmd, sec)
     await message.answer(f"✅ /{cmd}: {sec}с")
 
 
@@ -2830,6 +3473,40 @@ async def handle_text_router(message: Message):
     if message.text.startswith("/"):
         return
     await handle_triggers(message)
+
+
+async def handle_sell_price(message: Message):
+    user_id = message.from_user.id
+    instance_id = pending_sell.pop(user_id, None)
+    if not instance_id:
+        return
+    text = (message.text or "").strip()
+    if not text.isdigit():
+        await message.answer("❌ Цена должна быть числом! Продажа отменена.")
+        return
+    price = int(text)
+    if price <= 0:
+        await message.answer("❌ Цена должна быть больше 0!")
+        return
+    if price > 1_000_000:
+        await message.answer("❌ Слишком большая цена (макс 1 000 000).")
+        return
+    card = await get_card_by_instance(instance_id)
+    if not card or card["user_id"] != user_id:
+        await message.answer("❌ Карточка уже не в инвентаре.")
+        return
+    deleted = await delete_card(instance_id, user_id)
+    if not deleted:
+        await message.answer("❌ Ошибка удаления карточки.")
+        return
+    lot_id = f"lot_{int(time.time()*1000)}_{random.randint(1000,9999)}"
+    await add_auction_lot(lot_id, user_id, card, price)
+    await message.answer(
+        f"✅ **{card['name']}** выставлена за **{price}** монет!\n"
+        f"ID лота: `{lot_id}`\n\n"
+        f"Смотри свои лоты: `/ah`",
+        parse_mode="Markdown"
+    )
 
 
 # ============================================================
@@ -2852,7 +3529,7 @@ def get_user_groups():
     uid = request.args.get('user_id', type=str)
     if not uid or not uid.lstrip('-').isdigit():
         return jsonify({"ok": False, "error": "user_id must be an integer"}), 400
-    return jsonify({"ok": True, "result": user_groups.get(int(uid), [])})
+    return jsonify({"ok": True, "result": []})
 
 
 def run_flask():
@@ -2865,10 +3542,20 @@ def run_flask():
 
 async def main():
     global bot
-    migrate_files()
-    load_user_groups()
-    load_stats()
 
+    # 1. Инициализация БД
+    init_db()
+
+    # 2. Автоматически создаём/проверяем каталог карточек
+    existing = await get_cards_catalog()
+    for cid, c in DEFAULT_CARDS_CATALOG.items():
+        if cid not in existing:
+            await upsert_card_catalog(cid, c["name"], c["rarity"], c["file_id"])
+
+    # 3. Миграция JSON → Turso (один раз)
+    await migrate_from_json()
+
+    # 4. Инициализация бота
     bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     dp.include_router(router)
